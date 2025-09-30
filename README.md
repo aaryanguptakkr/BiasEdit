@@ -65,7 +65,7 @@ Enter [bias_tracing](./bias_tracing).
 
 <h2 id="4">📝 Citation</h2>
 
-If this code or paper was useful, please consider using the following citation:
+If this code or paper is useful, please consider using the following citation:
 
     @article{xin25BiasEdit,
         title={BiasEdit: Debiasing Stereotyped Language Models via Model Editing},
