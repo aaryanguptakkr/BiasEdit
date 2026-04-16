@@ -1,6 +1,7 @@
 import argparse
 import json, copy
-import os,sys
+import os, sys
+import time, datetime
 # os.chdir(sys.path[0])
 sys.path.append("./")
 import re
@@ -59,28 +60,31 @@ def main():
             "gpt2",
             "roberta-large",
             "bert-large-cased",
-            "gpt-j-6b"
+            "gpt-j-6b",
+            "allenai/OLMo-2-0425-1B",
+            "EleutherAI/pythia-1b",
         ],
     )
     aa("--bias_file", default="data/domain/gender.json")
     aa("--subject_file", default="data/knowns.json")          # set(stereoset target + stereoset subject + jieyu)
-    aa("--output_dir", default="results/{model_name}/causal_trace")
+    aa("--output_dir", default="results/{model_base}/{model_name}/causal_trace")
     aa("--noise_level", default="s3", type=parse_noise_rule)
     aa("--replace", default=0, type=int)
     aa("--pattern", default="all", choices=["all", "one"], type=str)
     aa("--samples", default=10, type=int)
     args = parser.parse_args()
 
-    modeldir = f'r{args.replace}_{args.model_name.split("/")[-1].replace("/", "_")}'
+    model_base = args.model_name.split("/")[-1]
+    modeldir = f'r{args.replace}_{model_base.replace("/", "_")}'
     modeldir = f"n{args.noise_level}_" + modeldir + f"_{args.bias_file.split('/')[-1].split('.')[0]}"
-    output_dir = args.output_dir.format(model_name=modeldir)
+    output_dir = args.output_dir.format(model_name=modeldir, model_base=model_base)
     result_dir = f"{output_dir}/cases"
     pdf_dir = f"{output_dir}/pdfs"
     os.makedirs(result_dir, exist_ok=True)
     os.makedirs(pdf_dir, exist_ok=True)
 
-    # Half precision to let the 20b model fit.
-    torch_dtype = torch.float16 if "20b" in args.model_name else None
+    # Use half precision for all models.
+    torch_dtype = torch.float16
 
     mt = ModelAndTokenizer(args.model_name, torch_dtype=torch_dtype)
 
@@ -111,8 +115,23 @@ def main():
         elif noise_level.startswith("u"):
             uniform_noise = True
             noise_level = float(noise_level[1:])
-    
-    
+
+    run_start = time.time()
+    run_log_path = "results/run_log.jsonl"
+    os.makedirs("results", exist_ok=True)
+    domain = args.bias_file.split("/")[-1].split(".")[0]
+    start_entry = {
+        "status": "started",
+        "model_name": args.model_name,
+        "domain": domain,
+        "output_dir": output_dir,
+        "num_layers": mt.num_layers,
+        "num_samples": len(knowns),
+        "start_time": datetime.datetime.now().isoformat(),
+    }
+    with open(run_log_path, "a") as _log_f:
+        _log_f.write(json.dumps(start_entry) + "\n")
+    print(f"[run_log] started: model={args.model_name} domain={domain} layers={mt.num_layers} samples={len(knowns)}")
 
     for knowledge in tqdm(knowns):
         ifskip = False
@@ -129,7 +148,7 @@ def main():
         if mt.iscausal:
             inp_anti, e_range_anti, blank_idxs_anti, inp_anti_origin = make_inputs(mt, prompts=[knowledge['anti']] * (args.samples + 1), labels=[knowledge['anti_mask']] * (args.samples + 1), subject=knowledge['subject'])
             inp_stereo, e_range_stereo, blank_idxs_stereo, inp_stereo_origin = make_inputs(mt, prompts=[knowledge['stereo']] * (args.samples + 1), labels=[knowledge['stereo_mask']] * (args.samples + 1), subject=knowledge['subject'])
-            if (inp_anti==None and e_range_anti==None and blank_idxs_anti==None and inp_stereo_origin==None) or (inp_stereo==None and e_range_stereo==None and blank_idxs_stereo==None and inp_stereo_origin==None):
+            if (inp_anti==None and e_range_anti==None and blank_idxs_anti==None and inp_anti_origin==None) or (inp_stereo==None and e_range_stereo==None and blank_idxs_stereo==None and inp_stereo_origin==None):
                 continue
             if inp_anti["input_ids"].shape[1] != inp_stereo["input_ids"].shape[1]:
                 continue
@@ -703,6 +722,23 @@ class ModelAndTokenizer:
                 tokenizer.add_special_tokens({'pad_token': '[PAD]'})
                 model.resize_token_embeddings(len(tokenizer))
                 model.transformer.wte.weight.data[-1] = model.transformer.wte.weight.data.mean(0)
+            elif "olmo" in model_name.lower():
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_name, low_cpu_mem_usage=low_cpu_mem_usage, torch_dtype=torch_dtype,
+                    trust_remote_code=True
+                )
+                if tokenizer.pad_token is None:
+                    tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+                    model.resize_token_embeddings(len(tokenizer))
+                    model.model.embed_tokens.weight.data[-1] = model.model.embed_tokens.weight.data.mean(0)
+            elif "pythia" in model_name.lower():
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_name, low_cpu_mem_usage=low_cpu_mem_usage, torch_dtype=torch_dtype
+                )
+                if tokenizer.pad_token is None:
+                    tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+                    model.resize_token_embeddings(len(tokenizer))
+                    model.gpt_neox.embed_in.weight.data[-1] = model.gpt_neox.embed_in.weight.data.mean(0)
             else:
                 model = AutoModelForMaskedLM.from_pretrained(
                     model_name, low_cpu_mem_usage=low_cpu_mem_usage, torch_dtype=torch_dtype
@@ -717,7 +753,7 @@ class ModelAndTokenizer:
             if (re.match(r"^(transformer|gpt_neox|model|bert|roberta)\.(h|layers|encoder.layer)\.\d+$", n))
         ]
         self.num_layers = len(self.layer_names)
-        if "gpt" in model_name.lower() or "llama" in model_name.lower():
+        if "gpt" in model_name.lower() or "llama" in model_name.lower() or "olmo" in model_name.lower() or "pythia" in model_name.lower():
             self.iscausal = True
         else:
             self.iscausal = False
@@ -887,9 +923,10 @@ def plot_trace_heatmap(result, savepdf_pre=None, title=None, xlabel=None, modeln
 
 # Utilities for dealing with tokens
 def make_inputs(mt, prompts, labels, subject=None, device="cuda"):    
-    if "gpt" in mt.model_name.lower():
-        prompts = [mt.tokenizer.bos_token + p for p in prompts]
-        labels = [mt.tokenizer.bos_token + p for p in labels]   
+    if "gpt" in mt.model_name.lower() or "olmo" in mt.model_name.lower():
+        bos = mt.tokenizer.bos_token if mt.tokenizer.bos_token is not None else mt.tokenizer.eos_token
+        prompts = [bos + p for p in prompts]
+        labels = [bos + p for p in labels]
     
     inputs = mt.tokenizer(
             prompts,
@@ -911,27 +948,32 @@ def make_inputs(mt, prompts, labels, subject=None, device="cuda"):
     if mt.iscausal:  # prompts with original sentences, labels with unk_token
         subject_range = []
         for subj in subject:
-            subject_range.append(find_token_range(mt.tokenizer, inputs["input_ids"][0], subj))
+            sr = find_token_range(mt.tokenizer, inputs["input_ids"][0], subj)
+            if sr is None: return None, None, None, None
+            subject_range.append(sr)
 
         inputs['labels'] = copy.deepcopy(inputs['input_ids'])
 
         for idx in range(len(inputs['labels'])):
             inputs['labels'][idx] = torch.where(inputs['input_ids'][idx] != mt.tokenizer.pad_token_id, inputs['input_ids'][idx], -100)  # ignore pad_tokens
             # for (b,e) in subject_range:             # ignore subjects
-            #     inputs['labels'][idx][b:e] = -100   
+            #     inputs['labels'][idx][b:e] = -100
             inputs['labels'][idx][0] = -100         # ignore bos_token
         blank_token_idxs = find_token_range(mt.tokenizer, inputslabels['input_ids'][0][1:], mt.tokenizer.unk_token)
+        if blank_token_idxs is None: return None, None, None, None
         blank_token_idxs = (blank_token_idxs[0]+1, blank_token_idxs[1]+1)
     else:
         subject_range = []
         for subj in subject:
-            subject_range.append(find_token_range(mt.tokenizer, inputslabels["input_ids"][0], subj))
+            sr = find_token_range(mt.tokenizer, inputslabels["input_ids"][0], subj)
+            if sr is None: return None, None, None, None
+            subject_range.append(sr)
         inputs['labels'] = copy.deepcopy(inputslabels['input_ids'])
         for idx in range(len(inputs['labels'])):    # prompts with [MASK], labels with original sentences
             inputs['labels'][idx] = torch.where(inputs['input_ids'][idx] == mt.tokenizer.mask_token_id, inputslabels['input_ids'][idx], -100)
-        
+
         blank_token_idxs = find_token_range(mt.tokenizer, inputs['input_ids'][0], mt.tokenizer.mask_token)
-    
+        if blank_token_idxs is None: return None, None, None, None
     return inputs.to(device), subject_range, blank_token_idxs, inputslabels
 
 
@@ -958,10 +1000,17 @@ def decode_tokens(tokenizer, token_array):
 
 
 def find_token_range(tokenizer, token_array, substrings):    # find substring in token_array, return [start, end)
+    if substrings is None:
+        return None
 
     toks = decode_tokens(tokenizer, token_array)
     whole_string = "".join(toks)
-    char_loc = whole_string.index(substrings)
+
+    try:
+        char_loc = whole_string.index(substrings)
+    except ValueError:
+        return None
+
     loc = 0
     tok_start, tok_end = None, None
     for i, t in enumerate(toks):

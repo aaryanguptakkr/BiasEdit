@@ -17,7 +17,7 @@ parser.add_argument("--model_name", type=str,
                     default="roberta-large")
 parser.add_argument("--bias", type=str,
                     help="The bias type.",
-                    choices=["gender", "race"],
+                    choices=["gender", "race", "profession", "religion"],
                     default="gender")
 parser.add_argument("--num_sample", type=int, 
                     help="The num of samples",
@@ -124,7 +124,7 @@ plt.legend()
 plt.ylabel('Absolute log probability difference')
 plt.title(f'{args.bias.title()} bias effect of states ({args.model_name})')
 plt.show()
-plt.savefig(f'results/{args.model_name}-{args.bias}-state-mlp-attn.pdf', format='pdf')
+plt.savefig(f'results/{args.model_name}-{args.bias}-states.png', format='png', bbox_inches='tight')
 
 
 # Sample data for demonstration
@@ -156,4 +156,4 @@ plt.legend()
 plt.ylabel('Absolute log probability difference')
 plt.title(f'{args.bias.title()} bias effect of different words ({args.model_name})')
 plt.show()
-plt.savefig(f'results/{args.model_name}-{args.bias}-words.pdf', format="pdf")
+plt.savefig(f'results/{args.model_name}-{args.bias}-words.png', format='png', bbox_inches='tight')

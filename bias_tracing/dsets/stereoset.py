@@ -32,7 +32,8 @@ class StereoSetDataset(Dataset):
         self.tokenizer = tokenizer
         self.data = []
         # self.config = config
-        self.ifcausal = "gpt" in model_name or "llama" in model_name
+        self.ifcausal = "gpt" in model_name.lower() or "llama" in model_name.lower() or "olmo" in model_name.lower() or "pythia" in model_name.lower()
+        self.isolmo = "olmo" in model_name.lower()
         if self.ifcausal:
             self.mask_token = tokenizer.unk_token
             self.mask_token_id = tokenizer.unk_token_id
@@ -97,7 +98,25 @@ class StereoSetDataset(Dataset):
                 unrelated_blank_tokens = self.tokenizer.encode(unrelated_word, add_special_tokens=False)
                 anti_sentence = obj['context'].replace("BLANK", self.mask_token * len(anti_blank_tokens))
                 stereo_sentence = obj['context'].replace("BLANK", self.mask_token * len(stereo_blank_tokens))
-                unrelated_sentence = obj['context'].replace("BLANK", self.mask_token * len(unrelated_blank_tokens))      
+                unrelated_sentence = obj['context'].replace("BLANK", self.mask_token * len(unrelated_blank_tokens))
+        elif self.isolmo:
+            if " BLANK" in obj['context']:
+                anti_word = " " + anti_word
+                stereo_word = " " + stereo_word
+                unrelated_word = " " + unrelated_word
+                anti_blank_tokens = self.tokenizer.encode(anti_word, add_special_tokens=False)
+                stereo_blank_tokens = self.tokenizer.encode(stereo_word, add_special_tokens=False)
+                unrelated_blank_tokens = self.tokenizer.encode(unrelated_word, add_special_tokens=False)
+                anti_sentence = obj['context'].replace(" BLANK", self.mask_token * len(anti_blank_tokens))
+                stereo_sentence = obj['context'].replace(" BLANK", self.mask_token * len(stereo_blank_tokens))
+                unrelated_sentence = obj['context'].replace(" BLANK", self.mask_token * len(unrelated_blank_tokens))
+            else:
+                anti_blank_tokens = self.tokenizer.encode(anti_word, add_special_tokens=False)
+                stereo_blank_tokens = self.tokenizer.encode(stereo_word, add_special_tokens=False)
+                unrelated_blank_tokens = self.tokenizer.encode(unrelated_word, add_special_tokens=False)
+                anti_sentence = obj['context'].replace("BLANK", self.mask_token * len(anti_blank_tokens))
+                stereo_sentence = obj['context'].replace("BLANK", self.mask_token * len(stereo_blank_tokens))
+                unrelated_sentence = obj['context'].replace("BLANK", self.mask_token * len(unrelated_blank_tokens))
         elif "llama" in self.tokenizer.__class__.__name__.lower():
             anti_blank_tokens = self.tokenizer.encode(anti_word, add_special_tokens=False)
             stereo_blank_tokens = self.tokenizer.encode(stereo_word, add_special_tokens=False)

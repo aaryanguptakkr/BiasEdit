@@ -1,0 +1,25 @@
+# Generated results
+bias_tracing/results/
+bias_tracing/logs/
+
+# Generated artifact types (causal trace outputs, plots)
+*.npz
+*.pdf
+
+# Run logs
+bias_tracing/*.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
