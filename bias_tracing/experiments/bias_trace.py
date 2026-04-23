@@ -65,6 +65,7 @@ def main():
             "EleutherAI/pythia-1b",
         ],
     )
+    aa("--branch", default=None)
     aa("--bias_file", default="data/domain/gender.json")
     aa("--subject_file", default="data/knowns.json")          # set(stereoset target + stereoset subject + jieyu)
     aa("--output_dir", default="results/{model_base}/{model_name}/causal_trace")
@@ -83,10 +84,16 @@ def main():
     os.makedirs(result_dir, exist_ok=True)
     os.makedirs(pdf_dir, exist_ok=True)
 
-    # Use half precision for all models.
-    torch_dtype = torch.float16
+    # Use corresponding model config from huggingface config
+    if 'olmo' in args.model_name.lower():
+        if 'instruct' in args.model_name.lower():
+            torch_dtype = torch.bfloat16
+        else:
+            torch_dtype = torch.float32
+    elif 'pythia' in args.model_name.lower():
+        torch_dtype = torch.float16
 
-    mt = ModelAndTokenizer(args.model_name, torch_dtype=torch_dtype)
+    mt = ModelAndTokenizer(args.model_name, torch_dtype=torch_dtype, branch=args.branch)
 
     # Embedding
     subjects = json.load(open(args.subject_file))
@@ -696,6 +703,7 @@ class ModelAndTokenizer:
         tokenizer=None,
         low_cpu_mem_usage=False,
         torch_dtype=None,
+        branch=None
     ):
         if tokenizer is None:
             assert model_name is not None
@@ -725,6 +733,7 @@ class ModelAndTokenizer:
             elif "olmo" in model_name.lower():
                 model = AutoModelForCausalLM.from_pretrained(
                     model_name, low_cpu_mem_usage=low_cpu_mem_usage, torch_dtype=torch_dtype,
+                    revision=branch,
                     trust_remote_code=True
                 )
                 if tokenizer.pad_token is None:
@@ -733,7 +742,8 @@ class ModelAndTokenizer:
                     model.model.embed_tokens.weight.data[-1] = model.model.embed_tokens.weight.data.mean(0)
             elif "pythia" in model_name.lower():
                 model = AutoModelForCausalLM.from_pretrained(
-                    model_name, low_cpu_mem_usage=low_cpu_mem_usage, torch_dtype=torch_dtype
+                    model_name, low_cpu_mem_usage=low_cpu_mem_usage, torch_dtype=torch_dtype,
+                    revision=branch
                 )
                 if tokenizer.pad_token is None:
                     tokenizer.add_special_tokens({'pad_token': '[PAD]'})
