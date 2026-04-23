@@ -837,7 +837,7 @@ def plot_trace_heatmap(result, savepdf_pre=None, title=None, xlabel=None, modeln
     labels_anti[result['blank_idxs_anti'][1]-1] = labels_anti[result['blank_idxs_anti'][1]-1].strip() + "]"
 
     savepdf = savepdf_pre+"_anti.pdf"
-    with plt.rc_context(rc={"font.family": "Times New Roman"}):
+    with plt.rc_context(rc={"font.family": "serif"}):
         fig, ax = plt.subplots(figsize=(3.5, 2), dpi=200)
         h = ax.pcolor(
             differences,
@@ -885,7 +885,7 @@ def plot_trace_heatmap(result, savepdf_pre=None, title=None, xlabel=None, modeln
     
     
     savepdf = savepdf_pre+"_stereo.pdf"
-    with plt.rc_context(rc={"font.family": "Times New Roman"}):
+    with plt.rc_context(rc={"font.family": "serif"}):
         fig, ax = plt.subplots(figsize=(3.5, 2), dpi=200)
         h = ax.pcolor(
             differences,

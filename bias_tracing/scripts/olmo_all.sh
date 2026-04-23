@@ -1,6 +1,7 @@
 #!/bin/bash
+set -m
 
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=0
 
 N_PARALLEL=5
 
@@ -47,3 +48,5 @@ for pair in "${model_branch_pairs[@]}"; do
         run_experiment "$model" "$branch" "$domain" &
     done
 done
+
+wait
