@@ -44,7 +44,7 @@ def main():
     def parse_noise_rule(code):
         if code in ["m", "s"]:
             return code
-        elif re.match("^[uts][\d\.]+", code):
+        elif re.match(r"^[uts][\d\.]+", code):
             return code
         else:
             return float(code)
