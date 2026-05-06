@@ -50,8 +50,8 @@ def main():
             return float(code)
 
     aa(
-        "--model_name",
-        default="gpt2-medium",
+        "--model_source",
+        default="allenai/OLMo-2-0425-1B",
         choices=[
             "llama-2-7b",
             "gpt2-xl",
@@ -62,10 +62,29 @@ def main():
             "bert-large-cased",
             "gpt-j-6b",
             "allenai/OLMo-2-0425-1B",
+            "allenai/OLMo-2-0425-1B-Instruct",
             "EleutherAI/pythia-1b",
         ],
     )
-    aa("--branch", default=None)
+    aa(
+        "--model_target",
+        default="allenai/OLMo-2-0425-1B-Instruct",
+        choices=[
+            "llama-2-7b",
+            "gpt2-xl",
+            "gpt2-large",
+            "gpt2-medium",
+            "gpt2",
+            "roberta-large",
+            "bert-large-cased",
+            "gpt-j-6b",
+            "allenai/OLMo-2-0425-1B",
+            "allenai/OLMo-2-0425-1B-Instruct",
+            "EleutherAI/pythia-1b",
+        ],
+    )
+    aa("--branch1", default=None)
+    aa("--branch2", default=None)
     aa("--bias_file", default="data/domain/gender.json")
     aa("--subject_file", default="data/knowns.json")          # set(stereoset target + stereoset subject + jieyu)
     aa("--output_dir", default="results/{model_base}/{model_name}/causal_trace")
@@ -75,7 +94,9 @@ def main():
     aa("--samples", default=10, type=int)
     args = parser.parse_args()
 
-    model_base = args.model_name.split("/")[-1]
+    model_base_source = args.model_source.split("/")[-1]
+    model_base_target = args.model_target.split("/")[-1]
+    model_base = f"{model_base_source}_to_{model_base_target}"
     modeldir = f'r{args.replace}_{model_base.replace("/", "_")}'
     modeldir = f"n{args.noise_level}_" + modeldir + f"_{args.bias_file.split('/')[-1].split('.')[0]}"
     output_dir = args.output_dir.format(model_name=modeldir, model_base=model_base)
@@ -84,23 +105,31 @@ def main():
     os.makedirs(result_dir, exist_ok=True)
     os.makedirs(pdf_dir, exist_ok=True)
 
-    # Use corresponding model config from huggingface config
-    if 'olmo' in args.model_name.lower():
-        if 'instruct' in args.model_name.lower():
-            torch_dtype = torch.bfloat16
-        else:
-            torch_dtype = torch.float32
-    elif 'pythia' in args.model_name.lower():
-        torch_dtype = torch.float16
+    def get_dtype(model_name):
+        # Use corresponding model config from huggingface config
+        if 'olmo' in model_name.lower():
+            if 'instruct' in model_name.lower():
+                torch_dtype = torch.bfloat16
+            else:
+                torch_dtype = torch.float32
+        elif 'pythia' in model_name.lower():
+            torch_dtype = torch.float16
+        return torch_dtype
 
-    mt = ModelAndTokenizer(args.model_name, torch_dtype=torch_dtype, branch=args.branch)
+    torch_dtype_source = get_dtype(args.model_source)
+    torch_dtype_target = get_dtype(args.model_target)
+
+    mt_source = ModelAndTokenizer(args.model_source, torch_dtype=torch_dtype_source, branch=args.branch1)
+    mt_target = ModelAndTokenizer(args.model_target, torch_dtype=torch_dtype_target, branch=args.branch2)
 
     # Embedding
     subjects = json.load(open(args.subject_file))
 
     # Bias Dataset
-    knowns = StereoSetDataset(mt.tokenizer, args.bias_file, args.model_name)
+    knowns = StereoSetDataset(mt_target.tokenizer, args.bias_file, args.model_target)
 
+    # TODO: check
+    # when patching mt1 clean -> mt2 corrupted do you use noise from mt2?
     noise_level = args.noise_level
     uniform_noise = False
     if isinstance(noise_level, str):
@@ -108,17 +137,17 @@ def main():
             # Automatic spherical gaussian
             factor = float(noise_level[1:]) if len(noise_level) > 1 else 1.0
             noise_level = factor * collect_embedding_std(
-                mt, subjects
+                mt_target, subjects
             )
             print(f"Using noise_level {noise_level} to match model times {factor}")
         elif noise_level == "m":
             # Automatic multivariate gaussian
-            noise_level = collect_embedding_gaussian(mt)
+            noise_level = collect_embedding_gaussian(mt_target)
             print(f"Using multivariate gaussian to match model noise")
         elif noise_level.startswith("t"):
             # Automatic d-distribution with d degrees of freedom
             degrees = float(noise_level[1:])
-            noise_level = collect_embedding_tdist(mt, degrees)
+            noise_level = collect_embedding_tdist(mt_target, degrees)
         elif noise_level.startswith("u"):
             uniform_noise = True
             noise_level = float(noise_level[1:])
@@ -129,16 +158,16 @@ def main():
     domain = args.bias_file.split("/")[-1].split(".")[0]
     start_entry = {
         "status": "started",
-        "model_name": args.model_name,
+        "model_name": model_base,
         "domain": domain,
         "output_dir": output_dir,
-        "num_layers": mt.num_layers,
+        "num_layers": mt_target.num_layers,
         "num_samples": len(knowns),
         "start_time": datetime.datetime.now().isoformat(),
     }
     with open(run_log_path, "a") as _log_f:
         _log_f.write(json.dumps(start_entry) + "\n")
-    print(f"[run_log] started: model={args.model_name} domain={domain} layers={mt.num_layers} samples={len(knowns)}")
+    print(f"[run_log] started: model={model_base} domain={domain} layers={mt_target.num_layers} samples={len(knowns)}")
 
     for knowledge in tqdm(knowns):
         ifskip = False
@@ -152,38 +181,39 @@ def main():
         known_id = knowledge["id"]
 
         # original difference: base_score
-        if mt.iscausal:
-            inp_anti, e_range_anti, blank_idxs_anti, inp_anti_origin = make_inputs(mt, prompts=[knowledge['anti']] * (args.samples + 1), labels=[knowledge['anti_mask']] * (args.samples + 1), subject=knowledge['subject'])
-            inp_stereo, e_range_stereo, blank_idxs_stereo, inp_stereo_origin = make_inputs(mt, prompts=[knowledge['stereo']] * (args.samples + 1), labels=[knowledge['stereo_mask']] * (args.samples + 1), subject=knowledge['subject'])
+        if mt_target.iscausal:
+            inp_anti, e_range_anti, blank_idxs_anti, inp_anti_origin = make_inputs(mt_target, prompts=[knowledge['anti']] * (args.samples + 1), labels=[knowledge['anti_mask']] * (args.samples + 1), subject=knowledge['subject'])
+            inp_stereo, e_range_stereo, blank_idxs_stereo, inp_stereo_origin = make_inputs(mt_target, prompts=[knowledge['stereo']] * (args.samples + 1), labels=[knowledge['stereo_mask']] * (args.samples + 1), subject=knowledge['subject'])
             if (inp_anti==None and e_range_anti==None and blank_idxs_anti==None and inp_anti_origin==None) or (inp_stereo==None and e_range_stereo==None and blank_idxs_stereo==None and inp_stereo_origin==None):
                 continue
             if inp_anti["input_ids"].shape[1] != inp_stereo["input_ids"].shape[1]:
                 continue
             with torch.no_grad():
-                pred_anti = _logits(mt.model(**inp_anti))
+                pred_anti = _logits(mt_target.model(**inp_anti))
                 targ_anti = inp_anti["labels"]
-                pred_stereo = _logits(mt.model(**inp_stereo))
+                pred_stereo = _logits(mt_target.model(**inp_stereo))
                 targ_stereo = inp_stereo["labels"]
                 base_score = causal_difference(pred_anti, targ_anti, pred_stereo, targ_stereo)
                 print(base_score)   # before interrupting
                 # if base_score: print("Hello")
         else:
-            inp_anti, e_range_anti, blank_idxs_anti, inp_anti_origin = make_inputs(mt, prompts=[knowledge['anti_mask']] * (args.samples + 1), labels=[knowledge['anti']] * (args.samples + 1), subject=knowledge['subject'])
-            inp_stereo, e_range_stereo, blank_idxs_stereo, inp_stereo_origin = make_inputs(mt, prompts=[knowledge['stereo_mask']] * (args.samples + 1), labels=[knowledge['stereo']] * (args.samples + 1), subject=knowledge['subject'])
+            inp_anti, e_range_anti, blank_idxs_anti, inp_anti_origin = make_inputs(mt_target, prompts=[knowledge['anti_mask']] * (args.samples + 1), labels=[knowledge['anti']] * (args.samples + 1), subject=knowledge['subject'])
+            inp_stereo, e_range_stereo, blank_idxs_stereo, inp_stereo_origin = make_inputs(mt_target, prompts=[knowledge['stereo_mask']] * (args.samples + 1), labels=[knowledge['stereo']] * (args.samples + 1), subject=knowledge['subject'])
             if (inp_anti==None and e_range_anti==None and blank_idxs_anti==None and inp_anti_origin==None) or (inp_stereo==None and e_range_stereo==None and blank_idxs_stereo==None and  inp_stereo_origin==None):
                 continue
             if inp_anti["input_ids"].shape[1] != inp_stereo["input_ids"].shape[1]:
                 continue
             with torch.no_grad():
-                pred_anti = _logits(mt.model(**inp_anti))
+                pred_anti = _logits(mt_target.model(**inp_anti))
                 targ_anti = inp_anti["labels"]
-                pred_stereo = _logits(mt.model(**inp_stereo))
+                pred_stereo = _logits(mt_target.model(**inp_stereo))
                 targ_stereo = inp_stereo["labels"]
                 base_score = mask_difference(pred_anti, targ_anti, pred_stereo, targ_stereo) 
         
         # difference after corrupting the embedding of bias attribute words, the lowest difference
         anti_outputs = trace_with_patch(
-            model=mt.model,
+            model_source=mt_source.model,
+            model_target=mt_target.model,
             inp=inp_anti, 
             states_to_patch=[], 
             tokens_to_mixs=e_range_anti, # bias attribute words
@@ -192,7 +222,8 @@ def main():
         )
 
         stereo_outputs = trace_with_patch(
-            model=mt.model,
+            model_source=mt_source.model,
+            model_target=mt_target.model,
             inp=inp_stereo, 
             states_to_patch=[], 
             tokens_to_mixs=e_range_stereo, 
@@ -205,7 +236,7 @@ def main():
         pred_stereo = _logits(stereo_outputs)
         targ_stereo = inp_stereo["labels"]
 
-        if mt.iscausal:
+        if mt_target.iscausal:
             # We report the difference of log probabilities for the whole sentence except the corrupted tokens.
             low_score = causal_difference(pred_anti[1:], targ_anti[1:], pred_stereo[1:], targ_stereo[1:])
         else:
@@ -214,14 +245,14 @@ def main():
 
 
         for kind in None, "mlp", "attn":
-            if kind=="mlp" and not mt.iscausal:
+            if kind=="mlp" and not mt_target.iscausal:
                 kind = "intermediate"
             print(f"Causal Tracing for {known_id} {kind} ==========================================================")
             kind_suffix = f"_{kind}" if kind else ""
             filename = f"{result_dir}/knowledge_{known_id}{kind_suffix}.npz"
             if not os.path.isfile(filename):
                 result = calculate_hidden_flow(
-                    mt,
+                    mt_target,
                     knowledge,
                     inp_anti,                       # context
                     inp_stereo,
@@ -254,11 +285,12 @@ def main():
             plot_result = dict(numpy_result)
             plot_result["kind"] = kind
             pdfname = f'{pdf_dir}/{known_id}_{str("_".join(numpy_result["subject"])).strip()}_{kind_suffix}'
-            plot_trace_heatmap(plot_result, savepdf_pre=pdfname, modelname=mt.model_name)
+            plot_trace_heatmap(plot_result, savepdf_pre=pdfname, modelname=mt_target.model_name)
 
 
 def trace_with_patch(
-    model,  # The model
+    model_source, # The source model to patch from
+    model_target,  # The target model to patch to
     inp,  # A set of inputs
     states_to_patch,  # A list of (token index, layername) triples to restore
     tokens_to_mixs, # Range List of tokens to corrupt (begin, end); subject tokens range
@@ -300,10 +332,19 @@ def trace_with_patch(
     for t, l in states_to_patch:
         patch_spec[l].append(t)
 
-    embed_layername = layername(model, 0, "embed")
+    embed_layername = layername(model_target, 0, "embed")
 
     def untuple(x):
         return x[0] if isinstance(x, tuple) else x
+    
+    # =========================================================================
+    # NEW STEP: Extract Clean States from the Source Model
+    # We must run this completely before defining the patch rule so the 
+    # data actually exists when the target model goes looking for it.
+    # =========================================================================
+    layers_to_trace = list(patch_spec.keys())
+    with torch.no_grad(), nethook.TraceDict(model_source, layers_to_trace) as source_trace:
+        model_source(**inp)
 
     # Define the model-patching rule.
     if isinstance(noise, float):
@@ -330,20 +371,25 @@ def trace_with_patch(
             return x
         # If this layer is in the patch_spec, restore the uncorrupted hidden state
         # for selected tokens.
+        
         h = untuple(x)
+
+        # MODIFIED: Reach back into cache and grab the source model's clean state
+        source_clean_h = untuple(source_trace[layer].output)
+
         for t in patch_spec[layer]:
-            h[1:, t] = h[0, t]
+            h[1:, t] = source_clean_h[0, t]
         return x
 
     # With the patching rules defined, run the patched model in inference.
     additional_layers = [] if trace_layers is None else trace_layers
 
     with torch.no_grad(), nethook.TraceDict(
-        model,
+        model_target,
         [embed_layername] + list(patch_spec.keys()) + additional_layers,
         edit_output=patch_rep,
     ) as td:
-        outputs_exp = model(**inp)
+        outputs_exp = model_target(**inp)
 
     # If tracing all layers, collect all activations together to return.
     if trace_layers is not None:
@@ -492,7 +538,8 @@ def causal_difference(pred_anti, targ_anti, pred_stereo, targ_stereo):
    
 
 def calculate_hidden_flow(
-    mt,
+    mt_source,
+    mt_target,
     knowledge,
     inp_anti, 
     inp_stereo,
@@ -518,7 +565,8 @@ def calculate_hidden_flow(
     
     if not kind:
         differences = trace_important_states(
-            mt,
+            mt_source,
+            mt_target,
             inp_anti, inp_stereo, 
             e_range_anti, e_range_stereo,
             blank_idxs_anti, blank_idxs_stereo,
@@ -529,7 +577,8 @@ def calculate_hidden_flow(
         )
     else:
         differences = trace_important_window(
-            mt,
+            mt_source,
+            mt_target,
             inp_anti, inp_stereo,
             e_range_anti, e_range_stereo,
             blank_idxs_anti, blank_idxs_stereo,
@@ -545,8 +594,8 @@ def calculate_hidden_flow(
         scores=differences,                                             
         anti_input_ids=inp_anti["input_ids"][0],                               # input_ids of the prompt
         stereo_input_ids=inp_stereo['input_ids'][0],
-        input_tokens_anti=decode_tokens(mt.tokenizer, inp_anti["input_ids"][0]) if mt.iscausal else decode_tokens(mt.tokenizer, inp_anti_origin['input_ids'][0]),  # tokens of the prompt
-        input_tokens_stereo=decode_tokens(mt.tokenizer, inp_stereo["input_ids"][0]) if mt.iscausal else decode_tokens(mt.tokenizer, inp_stereo_origin['input_ids'][0]),
+        input_tokens_anti=decode_tokens(mt_target.tokenizer, inp_anti["input_ids"][0]) if mt_target.iscausal else decode_tokens(mt_target.tokenizer, inp_anti_origin['input_ids'][0]),  # tokens of the prompt
+        input_tokens_stereo=decode_tokens(mt_target.tokenizer, inp_stereo["input_ids"][0]) if mt_target.iscausal else decode_tokens(mt_target.tokenizer, inp_stereo_origin['input_ids'][0]),
         corrupt_range_anti=e_range_anti,
         corrupt_range_stereo=e_range_stereo,
         blank_idxs_anti=blank_idxs_anti,
@@ -559,7 +608,8 @@ def calculate_hidden_flow(
 
 
 def trace_important_states(
-    mt,
+    mt_source,
+    mt_target,
     inp_anti, inp_stereo,
     e_range_anti, e_range_stereo,
     blank_idxs_anti, blank_idxs_stereo,
@@ -582,20 +632,21 @@ def trace_important_states(
 
     for tnum in range(ntoks_anti):
         row = []
-        for layer in range(mt.num_layers):
+        for layer in range(mt_target.num_layers):
             anti_outputs = trace_with_patch(
-                model=mt.model,
+                model_source=mt_source.model,
+                model_target=mt_target.model,
                 inp=inp_anti,
-                states_to_patch=[(tnum, layername(mt.model, layer))],
+                states_to_patch=[(tnum, layername(mt_target.model, layer))],
                 tokens_to_mixs=e_range_anti,
                 noise=noise,
                 uniform_noise=uniform_noise,
                 replace=replace,
             )
             stereo_outputs = trace_with_patch(
-                model=mt.model,
+                model=mt_target.model,
                 inp=inp_stereo,
-                states_to_patch=[(tnum, layername(mt.model, layer))],
+                states_to_patch=[(tnum, layername(mt_target.model, layer))],
                 tokens_to_mixs=e_range_stereo,
                 noise=noise,
                 uniform_noise=uniform_noise,
@@ -606,7 +657,7 @@ def trace_important_states(
             pred_stereo = _logits(stereo_outputs)
             targ_stereo = inp_stereo["labels"]
 
-            if mt.iscausal:
+            if mt_target.iscausal:
                 # We report the difference of softmax probabilities for the whole sentence except the corrupted tokens.
                 r = causal_difference(pred_anti[1:], targ_anti[1:], pred_stereo[1:], targ_stereo[1:])
             else:
@@ -618,7 +669,8 @@ def trace_important_states(
 
 
 def trace_important_window(
-    mt,
+    mt_source,
+    mt_target,
     inp_anti, inp_stereo,
     e_range_anti, e_range_stereo,
     blank_idxs_anti, blank_idxs_stereo,
@@ -641,15 +693,16 @@ def trace_important_window(
     table = [] # (num_layers, seq_len)
     for tnum in range(ntoks_anti):
         row = []
-        for layer in range(mt.num_layers):
+        for layer in range(mt_target.num_layers):
             layerlist_anti = [
-                (tnum, layername(mt.model, L, kind))
+                (tnum, layername(mt_target.model, L, kind))
                 for L in range(
-                    max(0, layer - window // 2), min(mt.num_layers, layer - (-window // 2))
+                    max(0, layer - window // 2), min(mt_target.num_layers, layer - (-window // 2))
                 )
             ]
             anti_outputs = trace_with_patch(
-                mt.model,
+                mt_source.model,
+                mt_target.model,
                 inp=inp_anti,
                 states_to_patch=layerlist_anti,
                 tokens_to_mixs=e_range_anti,
@@ -659,13 +712,13 @@ def trace_important_window(
             )
 
             layerlist_stereo = [
-                (tnum, layername(mt.model, L, kind))
+                (tnum, layername(mt_target.model, L, kind))
                 for L in range(
-                    max(0, layer - window // 2), min(mt.num_layers, layer - (-window // 2))
+                    max(0, layer - window // 2), min(mt_target.num_layers, layer - (-window // 2))
                 )
             ] 
             stereo_outputs = trace_with_patch(
-                mt.model,
+                mt_target.model,
                 inp=inp_stereo,
                 states_to_patch=layerlist_stereo,
                 tokens_to_mixs=e_range_stereo,
@@ -678,7 +731,7 @@ def trace_important_window(
             targ_anti = inp_anti["labels"]
             pred_stereo = _logits(stereo_outputs)
             targ_stereo = inp_stereo["labels"]
-            if mt.iscausal:
+            if mt_target.iscausal:
                 # We report the difference of softmax probabilities for the whole sentence except the corrupted tokens.
                 r = causal_difference(pred_anti[1:], targ_anti[1:], pred_stereo[1:], targ_stereo[1:])
             else:
