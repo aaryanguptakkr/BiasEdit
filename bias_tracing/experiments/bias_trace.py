@@ -252,6 +252,7 @@ def main():
             filename = f"{result_dir}/knowledge_{known_id}{kind_suffix}.npz"
             if not os.path.isfile(filename):
                 result = calculate_hidden_flow(
+                    mt_source,
                     mt_target,
                     knowledge,
                     inp_anti,                       # context
@@ -273,7 +274,8 @@ def main():
                 result["high_score"] = base_score               # before causal tracing, the original prob difference of bias term                                                                   
                 result["low_score"] = low_score                 # after corrupting embedding, return the prob difference of bias term
                 numpy_result = {
-                    k: v.detach().cpu().numpy() if torch.is_tensor(v) else v
+                    # MODIFIED: to prevent unsupported ScalarType BFloat16 in numpy cast to float32 first
+                    k: v.detach().to(torch.float32).cpu().numpy() if torch.is_tensor(v) else v
                     for k, v in result.items()
                 }
                 numpy.savez(filename, **numpy_result)
@@ -338,7 +340,7 @@ def trace_with_patch(
         return x[0] if isinstance(x, tuple) else x
     
     # =========================================================================
-    # NEW STEP: Extract Clean States from the Source Model
+    # MODIFIED: Extract Clean States from the Source Model
     # We must run this completely before defining the patch rule so the 
     # data actually exists when the target model goes looking for it.
     # =========================================================================
@@ -644,7 +646,8 @@ def trace_important_states(
                 replace=replace,
             )
             stereo_outputs = trace_with_patch(
-                model=mt_target.model,
+                model_source=mt_source.model,
+                model_target=mt_target.model,
                 inp=inp_stereo,
                 states_to_patch=[(tnum, layername(mt_target.model, layer))],
                 tokens_to_mixs=e_range_stereo,
@@ -718,7 +721,8 @@ def trace_important_window(
                 )
             ] 
             stereo_outputs = trace_with_patch(
-                mt_target.model,
+                model_source=mt_source.model,
+                model_target=mt_target.model,
                 inp=inp_stereo,
                 states_to_patch=layerlist_stereo,
                 tokens_to_mixs=e_range_stereo,
