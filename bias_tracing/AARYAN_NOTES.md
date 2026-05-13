@@ -95,8 +95,8 @@ and reports PASS/FAIL for each. Writes to `results/sanity_check/` only.
 | `data/domain/profession.json` | Profession | ~496–548 sentence pairs |
 | `data/domain/religion.json` | Religion | ~24–44 sentence pairs |
 
-All use StereoSet format. Use `fp16` — it is 10–13× faster than `fp32` on OLMo-sized models
-with no meaningful difference in causal trace results.
+All use StereoSet format. Dtype is set per model in `bias_trace.py` — OLMo base uses `float32`,
+OLMo Instruct uses `bfloat16`, Pythia uses `float16`. See performance notes for speed implications.
 
 ### Output format (`.npz` case files)
 
@@ -224,7 +224,7 @@ Key changes:
 - `ModelAndTokenizer`: OLMo and Pythia loading branches (pad-token resize, embedding init)
 - `StereoSetDataset`: `isolmo` flag for leading-space BLANK tokenisation in OLMo
 - `make_inputs`: `find_token_range` None-safe; OLMo added to BOS-prepend branch
-- `bias_trace.py`: always `fp16`; run logging to `results/run_log.jsonl`; output dir includes model base; fixed `inp_stereo_origin` → `inp_anti_origin` bug
+- `bias_trace.py`: dtype is model-specific — OLMo base → `float32`, OLMo Instruct → `bfloat16`, Pythia → `float16`; run logging to `results/run_log.jsonl`; output dir includes model base; fixed `inp_stereo_origin` → `inp_anti_origin` bug
 
 ### New bias domains
 
@@ -301,7 +301,8 @@ The model recovers to normal effect gaps by 315B tokens and keeps growing throug
 
 See `compute_profile.md` for full wall-time tables. Key takeaways:
 
-- **fp16 is the single biggest speedup** — OLMo fp32 at 2 procs: 7.66 s/layer/sent; fp16: 0.60 s/layer/sent (13× faster).
-- **Pythia-1B fp16 is nearly contention-immune** — 3 → 12 procs moves it only 1.05 → 1.56×.
-- **OLMo is architecture-bound at fp32** — even 2 processes runs 7× slower per layer than Pythia; this is the SwiGLU FFN cost, not contention.
+- **OLMo base runs in float32** (by code design) — 7.66 s/layer/sent at 2 procs. Switching to fp16 gives 0.60 s/layer/sent (13× faster), but the current code does not do this for OLMo base.
+- **OLMo Instruct runs in bfloat16**, Pythia in float16 — both are significantly faster than OLMo base.
+- **OLMo is architecture-bound at float32** — even 2 processes runs 7× slower per layer than Pythia; this is the SwiGLU FFN cost, not contention.
+- **Pythia-1B is nearly contention-immune** — 3 → 12 procs moves it only 1.05 → 1.56×.
 - For EasySteer and instruction-vectors comparisons, see `compute_profile_other_methods.md`.
