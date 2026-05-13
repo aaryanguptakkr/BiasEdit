@@ -295,41 +295,6 @@ distinguishes high-bias from low-bias examples, making causal tracing estimates 
 Notable instance: **OLMo-2-0425-1B at 21B tokens, gender domain** (`effect_gap = 0.0289`).
 The model recovers to normal effect gaps by 315B tokens and keeps growing through full training.
 
-### What we found for OLMo-2-0425-1B and Pythia-1B
-
-**Bias is not stored in mid-layer MLPs.**
-
-In factual recall (ROME paper), NIE peaks sharply at specific middle-layer MLPs — the model
-"looks up" a fact there. For gender, race, and profession bias, the pattern is different:
-
-- **NIE is highest at L0 (the first transformer layer)** and declines monotonically through the
-  network. At late layers, NIE goes *negative* — the restoration actively hurts.
-- **MLP-only NIE is flat or negative** across all layers. There is no single MLP layer acting
-  as a bias "storage" site.
-- This suggests bias is encoded very early in the network — the signal is already present at
-  the output of the first transformer layer and is not amplified or concentrated at deeper layers.
-  Note: the raw token embedding (`model.embed_tokens`) is not directly patched in these traces
-  (it is only used for the noise corruption step), so we cannot make a direct claim about the
-  embedding layer itself — only that the earliest transformer layer carries the dominant signal.
-
-**Effect gap grows with training, but the pattern holds.**
-
-The high–low score gap (how much corrupting the subject hurts the model) grows across training
-checkpoints, indicating the model increasingly relies on the subject identity. But the L0-dominant,
-negative-late-layer NIE pattern persists at all checkpoints.
-
-**Religion domain is unreliable.**
-
-Only 24–44 sentence pairs, with effect gaps < 0.03 at later OLMo checkpoints. NIE estimates
-for religion are noisy and should be treated with caution.
-
-### Implication
-
-Standard causal tracing (designed for factual recall) may not localize bias the same way because
-bias is lexically encoded, not "computed" by the network. Intervention methods that target
-specific MLP layers (like ROME/MEMIT) may therefore be less effective for debiasing than
-approaches that address the token embedding space directly.
-
 ---
 
 ## Performance notes
