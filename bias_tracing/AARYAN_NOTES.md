@@ -260,8 +260,9 @@ Where "Absolute Diff" = |log P(stereotyped) − log P(anti-stereotyped)| for the
 - NIE < 0: restoring this position makes things *worse* than the corrupted baseline (inconsistent state)
 - NIE = 1: full recovery
 
-In terms of stored values: `(states_nie[L] − mean_low) / effect_gap` — where `mean_low` ≈ Corrupted
-baseline and `mean_high` ≈ Clean baseline, so `effect_gap = mean_high − mean_low` = Clean − Corrupted.
+In terms of stored values: `(states_nie[L] − mean_low) / effect_gap` — where `mean_low` is the
+mean corrupted-run score (subject tokens noised), `mean_high` is the mean clean-run score, and
+`effect_gap = mean_high − mean_low` = Clean − Corrupted.
 
 > **Note on field naming in `stats.json`**: The fields `states_nie`, `attn_nie`, `mlp_nie` store
 > **raw abs log prob diffs** (not normalized NIE values), despite the `_nie` suffix. They are the
