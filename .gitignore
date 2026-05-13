@@ -5,6 +5,8 @@ bias_tracing/logs/
 # Generated artifact types (causal trace outputs, plots)
 *.npz
 *.pdf
+!bias_tracing/plots/*.pdf
+!bias_tracing/plots/**/*.pdf
 
 # Run logs
 bias_tracing/*.log
