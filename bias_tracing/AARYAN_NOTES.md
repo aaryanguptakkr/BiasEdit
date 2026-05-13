@@ -302,13 +302,15 @@ The model recovers to normal effect gaps by 315B tokens and keeps growing throug
 In factual recall (ROME paper), NIE peaks sharply at specific middle-layer MLPs — the model
 "looks up" a fact there. For gender, race, and profession bias, the pattern is different:
 
-- **NIE is highest at L0 (the embedding layer)** and declines monotonically through the network.
-  At late layers, NIE goes *negative* — the restoration actively hurts.
+- **NIE is highest at L0 (the first transformer layer)** and declines monotonically through the
+  network. At late layers, NIE goes *negative* — the restoration actively hurts.
 - **MLP-only NIE is flat or negative** across all layers. There is no single MLP layer acting
   as a bias "storage" site.
-- This means bias enters the model as a property of the token embedding itself — words like
-  "father" or "Hispanic" carry the stereotypic signal directly in their vector. The transformer
-  layers propagate this signal without amplifying or concentrating it.
+- This suggests bias is encoded very early in the network — the signal is already present at
+  the output of the first transformer layer and is not amplified or concentrated at deeper layers.
+  Note: the raw token embedding (`model.embed_tokens`) is not directly patched in these traces
+  (it is only used for the noise corruption step), so we cannot make a direct claim about the
+  embedding layer itself — only that the earliest transformer layer carries the dominant signal.
 
 **Effect gap grows with training, but the pattern holds.**
 

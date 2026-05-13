@@ -583,7 +583,7 @@ def save_bias_trajectory(base_stats, instruct_stats, out_dir):
       1. Effect gap (high − low) — overall bias strength, raw abs log prob diff units.
       2. Embedding layer contribution — fraction of effect gap recovered at L0
          = (states_nie[0] − mean_low) / effect_gap. Scale-invariant across checkpoints.
-      3. Raw abs. log prob diff at L0 (states_nie[0]) — absolute causal signal at embedding.
+      3. Raw abs. log prob diff at L0 (states_nie[0]) — absolute causal signal at first transformer layer.
     Base checkpoints appear on the left; instruct fine-tuning on the right;
     a vertical dashed line marks the phase boundary.
     Output: {domain}-bias-trajectory.pdf  (one per domain)
@@ -640,12 +640,12 @@ def save_bias_trajectory(base_stats, instruct_stats, out_dir):
              'Larger = model relies more on subject identity for this domain'),
             (ax_frac, frac_l0s,
              'NIE at L0',
-             'NIE at L0 — normalized indirect effect at the embedding layer\n'
+             'NIE at L0 — normalized indirect effect at the first transformer layer\n'
              '= (Patched − Corrupted) / (Clean − Corrupted)'),
             (ax_raw, raw_l0s,
              'Abs. log prob diff at L0\n(stereo − anti)',
-             'Raw causal signal at layer 0 — absolute scale\n'
-             'Reflects both embedding importance and overall bias strength'),
+             'Raw causal signal at the first transformer layer — absolute scale\n'
+             'Reflects both L0 importance and overall bias strength'),
         ]
 
         for ax, vals, ylabel, title in panel_specs:
