@@ -23,13 +23,12 @@ run_experiment() {
     local domain=$3
 
     echo "[START] $model ($branch) - Domain: $domain"
-    
     python experiments/bias_trace.py \
         --model_name="$model" \
         --branch="$branch" \
         --bias_file="data/domain/$domain.json" \
         --output_dir="results/$model/$branch/$domain/causal_trace"
-        
+
     echo "[FINISH] $model ($branch) - Domain: $domain"
 }
 
