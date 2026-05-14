@@ -31,8 +31,13 @@ python scripts/plot_checkpoint_heatmap.py "$@"
 echo ""
 
 # Step 2: bar charts, composites, cross-checkpoint grids, stats, reports
-echo ">>> Step 2/2: Bar charts, composites, reports"
+echo ">>> Step 2/3: Bar charts, composites, reports"
 python fig.py "$@"
+echo ""
+
+# Step 3: comparison plots (reads from stats.json — no zip needed)
+echo ">>> Step 3/3: Comparison plots (base vs instruct, OLMo vs Pythia, trajectory)"
+python scripts/regenerate_compare_plots.py
 echo ""
 
 echo "=================================================="

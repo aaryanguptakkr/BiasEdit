@@ -150,35 +150,58 @@ Set `ZIP_PATH` at the top of `fig.py` and `scripts/plot_checkpoint_heatmap.py` t
 
 ```
 plots/
-├── <domain>-bias-trajectory.pdf            ← 3-panel training timeline (effect gap, NIE at L0, raw L0)
-├── <domain>-base-vs-instruct.pdf           ← bar charts: last base ckpt + all instruct ckpts
-├── <domain>-base-vs-instruct-lines.pdf     ← line plots: base (solid) vs instruct (dashed)
-├── <domain>-olmo-vs-pythia.pdf             ← cross-architecture line comparison (OLMo vs Pythia)
-└── <model>/
-    ├── stats.json                              ← all numeric data; reload to avoid re-running
-    ├── report.md                               ← human-readable summary (peak layers, n_cases, etc.)
-    ├── heatmap_checkpoint_layer.pdf            ← checkpoint × layer heatmap (MLP + Attn)
-    ├── <domain>-line-checkpoints.pdf           ← layer profiles as lines, one per checkpoint
-    ├── <domain>-states-all-checkpoints.pdf     ← bar charts: all checkpoints in one figure
-    ├── <domain>-words-all-checkpoints.pdf
-    ├── <domain>-bias-delta.pdf                 ← Δ abs. log prob diff between consecutive checkpoints
-    └── <checkpoint_label>/                     ← one folder per checkpoint
-        ├── <domain>-states.pdf                 ← single / attn-severed / MLP-severed bars
-        ├── <domain>-words.pdf                  ← bias-word / pre-blank / blank-token bars
-        ├── composite-states.pdf                ← all 4 domains side-by-side
-        ├── composite-words.pdf
-        └── composite-all.pdf                   ← 2×4 grid: top=states, bottom=words
+├── PLOTS_GUIDE.md                          ← full reader guide (plot descriptions, conventions)
+│
+├── <model>/                                ← one folder per model
+│   ├── stats.json                              ← all numeric data; reload to avoid re-running
+│   ├── report.md                               ← human-readable summary (peak layers, n_cases, etc.)
+│   ├── heatmap_checkpoint_layer.pdf            ← checkpoint × layer heatmap (MLP + Attn)
+│   ├── <domain>-line-checkpoints.pdf           ← layer profiles as lines, one per checkpoint
+│   ├── <domain>-states-all-checkpoints.pdf     ← bar charts: all checkpoints in one figure
+│   ├── <domain>-words-all-checkpoints.pdf
+│   ├── <domain>-bias-delta.pdf                 ← Δ abs. log prob diff between consecutive checkpoints
+│   └── <checkpoint_label>/                     ← one folder per checkpoint
+│       ├── <domain>-states.pdf                 ← single / attn-severed / MLP-severed bars
+│       ├── <domain>-words.pdf                  ← bias-word / pre-blank / blank-token bars
+│       ├── composite-states.pdf                ← all 4 domains side-by-side
+│       ├── composite-words.pdf
+│       └── composite-all.pdf                   ← 2×4 grid: top=states, bottom=words
+│
+├── compare/                                ← cross-model comparison plots
+│   ├── <domain>-bias-trajectory.pdf            ← 3-panel training timeline (effect gap, NIE at L0, raw L0)
+│   ├── <domain>-base-vs-instruct.pdf           ← bar charts: last base ckpt + all instruct ckpts
+│   ├── <domain>-base-vs-instruct-lines.pdf     ← line plots: base (solid) vs instruct (dashed)
+│   └── <domain>-olmo-vs-pythia.pdf             ← cross-architecture line comparison (OLMo vs Pythia)
+│
+└── cross_patch/                            ← cross-model activation patching
+    ├── pre_to_post/                            source: OLMo base  →  target: OLMo Instruct
+    │   ├── <domain>-states.pdf
+    │   ├── <domain>-words.pdf
+    │   ├── composite-states.pdf
+    │   ├── composite-words.pdf
+    │   └── composite-all.pdf
+    ├── post_to_pre/                            source: OLMo Instruct  →  target: OLMo base (same layout)
+    ├── <domain>-directions-states.pdf          ← pre→post vs post→pre side-by-side, fixed Y-axis
+    └── <domain>-directions-words.pdf
 ```
 
-**Regenerating comparison plots without re-running the full pipeline:**
+**Full regeneration (three independent steps):**
 
 ```bash
 cd bias_tracing
+
+# Step 1 — within-model bar charts + delta plots (reads zip, ~10–15 min)
+python fig.py --plots bars delta
+
+# Step 2 — cross-patch plots (reads local NFS, ~5 min, no GPU)
+python fig.py --plots cross_patch
+
+# Step 3 — comparison + line plots (reads stats.json, ~1 min, no GPU or zip)
 python scripts/regenerate_compare_plots.py
 ```
 
-Reads from existing `plots/<model>/stats.json` — no GPU or zip needed. Regenerates all top-level
-PDFs (bias-trajectory, base-vs-instruct, olmo-vs-pythia, line-checkpoints per model).
+Steps 2 and 3 are independent of each other and can be run in any order after step 1.
+Step 3 reads only from `plots/<model>/stats.json` — no zip or GPU needed.
 
 ### Reloading stats without re-running
 
@@ -200,11 +223,52 @@ Fields per domain entry: `n_cases`, `num_layers`, `mean_high`, `mean_low`, `effe
 
 ---
 
+## Stage 3 — Cross-patch plots (no GPU, no zip)
+
+Cross-model patching tests whether activations from a *source* model can drive bias predictions
+in a *target* model. The `.npz` format and the `collect_scores` / `_draw_bars` pipeline are
+identical to within-model tracing, so no new data-loading code was needed.
+
+**Data location (local NFS, not in the zip):**
+```
+/deepfreeze/share/omar_transfer/results/cross_patch/
+    olmo_1b_pre_to_post/    ← base activations patched into instruct model
+    olmo_1b_post_to_pre/    ← instruct activations patched into base model
+```
+Each direction contains `gender/`, `profession/`, `race/`, `religion/` subdirs with
+`causal_trace/cases/*.npz` files (same format as stage 1 output).
+
+**Running:**
+```bash
+cd bias_tracing
+python fig.py --plots cross_patch                        # both directions
+python fig.py --plots cross_patch --direction pre_to_post  # one direction only
+python fig.py --plots cross_patch --bias gender          # one domain only
+```
+
+**How it works in `fig.py`:**
+- `load_cross_patch_domain(direction_key, domain, num_sample)` — reads `.npz` files from
+  local NFS, calls `collect_scores`, returns a result dict per domain.
+- `save_cross_patch_direction(direction_key, domain_results, out_dir)` — generates individual
+  PDFs and composites in `plots/cross_patch/{direction}/`, mirroring the per-checkpoint layout.
+- `save_cross_patch_comparison(all_direction_results, domains, out_dir)` — puts both directions
+  side-by-side with a fixed Y-axis in `plots/cross_patch/`.
+
+All three functions are gated by `RUN_CROSS_PATCH` and controlled via `--plots cross_patch`.
+
+**Adding a new cross-patch direction:**
+1. Add an entry to `CROSS_PATCH_CONFIGS` in `plot_utils.py` (specify `dir`, `label`, `desc`).
+2. Place the `.npz` files under `CROSS_PATCH_BASE/<your_dir>/<domain>/causal_trace/cases/`.
+3. Run `python fig.py --plots cross_patch --direction <your_key>`.
+
+---
+
 ## Adding a new model or checkpoint
 
 1. Add it to `scripts/olmo_all.sh` (or run `bias_trace.py` directly) — stage 1.
-2. Add it to `MODEL_CONFIGS` in `fig.py` and `scripts/plot_checkpoint_heatmap.py` — stage 2.
-3. Run `bash generate_bias_plots.sh` to regenerate plots and stats.
+2. Add it to `MODEL_CONFIGS` in **`plot_utils.py`** (single source of truth — propagates to
+   `fig.py`, `plot_checkpoint_heatmap.py`, and all comparison scripts automatically).
+3. Run the three plot-generation steps in order (see Stage 2 output structure above).
 
 For OLMo-family models set `trust_remote_code=True` (handled automatically in `ModelAndTokenizer`).
 For models with a leading-space BLANK tokenisation quirk, pass `isolmo=True` to `StereoSetDataset`.

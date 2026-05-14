@@ -1,23 +1,55 @@
 """
-Generate bar-chart bias-tracing plots for every model × checkpoint × domain.
+Generate all bias-tracing bar-chart plots.
+
+──────────────────────────────────────────────────────────────────────────────
+WITHIN-MODEL PATCHING  (--plots bars | delta | compare)
+──────────────────────────────────────────────────────────────────────────────
+Standard causal tracing: corrupt the subject tokens of one model, restore one
+hidden state at a time, measure how much the bias-consistent prediction recovers.
 
 Per checkpoint  →  plots/{model}/{label}/
-    {domain}-states.pdf         single/attn-severed/mlp-severed bars per layer
-    {domain}-words.pdf          bias-word/pre-blank/blank-token bars per layer
+    {domain}-states.pdf         full / Attn-severed / MLP-severed bars per layer
+    {domain}-words.pdf          bias-word / pre-blank / blank-token bars per layer
     composite-states.pdf        all 4 domains side-by-side (states)
     composite-words.pdf         all 4 domains side-by-side (words)
     composite-all.pdf           2×4 grid: top=states, bottom=words
 
 Per domain (across all checkpoints)  →  plots/{model}/
     {domain}-states-all-checkpoints.pdf   one subplot per checkpoint
-    {domain}-words-all-checkpoints.pdf    one subplot per checkpoint
+    {domain}-words-all-checkpoints.pdf
+    {domain}-bias-delta.pdf               Δ signal between consecutive checkpoints
 
 Per model  →  plots/{model}/
-    stats.json    all numeric data (NIE by layer, peak layers, n_cases, scores)
+    stats.json    all numeric data (reloadable without re-running)
     report.md     human-readable summary tables
 
-Data is read directly from the shared zip; falls back to local filesystem
-for checkpoints that are already extracted.
+Data source: shared zip (--source zip, default) or local NFS (--source local).
+
+──────────────────────────────────────────────────────────────────────────────
+CROSS-PATCH  (--plots cross_patch)
+──────────────────────────────────────────────────────────────────────────────
+Cross-model patching: activations from a *source* model are injected into a
+*target* model. This tests whether the source model's representations are
+sufficient to drive bias predictions in the target — i.e. whether bias is
+encoded in a transferable way between pre-training and instruction fine-tuning.
+
+Two directions:
+  pre_to_post — source: base pre-trained  /  target: instruct fine-tuned
+  post_to_pre — source: instruct fine-tuned  /  target: base pre-trained
+
+Per direction  →  plots/cross_patch/{direction}/
+    {domain}-states.pdf         bars per layer (same 3-bar layout as within-model)
+    {domain}-words.pdf
+    composite-states.pdf        all 4 domains side-by-side
+    composite-words.pdf
+    composite-all.pdf           2×4 grid
+
+Comparison (both directions)  →  plots/cross_patch/
+    {domain}-directions-states.pdf   pre→post vs post→pre, fixed Y-axis
+    {domain}-directions-words.pdf
+
+Data source: local filesystem at CROSS_PATCH_BASE (defined in plot_utils.py).
+Use --direction to run only one direction.
 """
 
 import os
@@ -33,235 +65,117 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-# ── paths ────────────────────────────────────────────────────────────────────
-
-ZIP_PATH   = '/deepfreeze/share/xuxin_transfer/bias_tracing/results.zip'
-LOCAL_BASE = '/deepfreeze/aag026/Aaryan2/BiasEdit/bias_tracing/results'
-PLOTS_BASE = '/deepfreeze/aag026/Aaryan2/BiasEdit/bias_tracing/plots'
-
-# ── model / checkpoint catalogue ─────────────────────────────────────────────
-
-MODEL_CONFIGS = {
-    'OLMo-2-0425-1B': {
-        'zip_org':   'allenai',
-        'local_org': 'allenai',
-        'checkpoints': [
-            ('stage1-step0-tokens0B',                  '0B'),
-            ('stage1-step10000-tokens21B',              '21B'),
-            ('stage1-step150000-tokens315B',            '315B'),
-            ('stage1-step1140000-tokens2391B',          '2.4T'),
-            ('stage1-step1907359-tokens4001B',          '4T'),
-            ('stage2-ingredient3-step1000-tokens3B',    's2-3B'),
-            ('stage2-ingredient3-step11000-tokens24B',  's2-24B'),
-            ('stage2-ingredient3-step23852-tokens51B',  's2-51B'),
-        ],
-    },
-    'OLMo-2-0425-1B-Instruct': {
-        'zip_org':   'allenai',
-        'local_org': 'allenai',
-        'checkpoints': [
-            ('step_200',  'step200'),
-            ('step_1400', 'step1400'),
-            ('step_2600', 'step2600'),
-        ],
-    },
-    'pythia-1b': {
-        'zip_org':   'EleutherAI',
-        'local_org': 'EleutherAI',
-        'checkpoints': [
-            ('step0',     'step0'),
-            ('step1000',  'step1k'),
-            ('step5000',  'step5k'),
-            ('step81000', 'step81k'),
-            ('step137000','step137k'),
-            ('step143000','step143k'),
-        ],
-    },
-}
-
-BIAS_TYPES    = ['gender', 'profession', 'race', 'religion']
-STATES_LABELS = ['Effect of single state',
-                 'Effect with Attn severed',
-                 'Effect with MLP severed']
-WORDS_LABELS  = ['Effect of bias attribute words',
-                 'Effect of the token before attribute terms',
-                 'Effect of attribute terms']
-BAR_COLORS    = ['blue', 'red', 'green']
+from plot_utils import (
+    ZIP_PATH, LOCAL_BASE, PLOTS_BASE,
+    MODEL_CONFIGS, BIAS_TYPES,
+    CROSS_PATCH_BASE, CROSS_PATCH_CONFIGS,
+    STATES_LABELS, WORDS_LABELS, BAR_COLORS, LOW_SIGNAL, Y_LABEL_BARS,
+    FS_SUPTITLE, FS_TITLE, FS_LABEL, FS_TICK, FS_LEGEND, FS_ANNOT,
+    FIG_BAR_W_SINGLE, FIG_BAR_H_SINGLE, FIG_BAR_W_PER_COL,
+    FIG_GRID_W_PER_COL, FIG_ROW_H, FIG_LINE_W_PER_PAN, FIG_TRAJ_H,
+    BASE_COLOR, INSTRUCT_COLOR, LOW_SIG_COLOR, LOW_SIG_BG,
+    local_cases_dir, zip_cases_prefix, partition_names,
+    load_npz_local, load_npz_zip,
+    collect_scores, _draw_bars, _savepdf,
+)
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
-PLOT_CHOICES = ['bars', 'delta', 'compare']
+PLOT_CHOICES = ['bars', 'delta', 'compare', 'cross_patch']
 
 parser = argparse.ArgumentParser(
     formatter_class=argparse.RawDescriptionHelpFormatter,
     description=__doc__,
     epilog="""
 examples:
-  python fig.py                              # everything (default)
-  python fig.py --plots delta compare        # only delta + base-vs-instruct, skip bar charts
-  python fig.py --plots bars                 # only per-checkpoint bar charts
+  python fig.py                                    # everything (default)
+  python fig.py --plots bars                       # only per-checkpoint bar charts
+  python fig.py --plots delta compare              # only delta + base-vs-instruct
+  python fig.py --plots cross_patch                # only cross-patch plots
+  python fig.py --plots cross_patch --direction pre_to_post  # one direction only
   python fig.py --model pythia-1b --plots bars delta
 """)
 parser.add_argument('--model', default=None, choices=list(MODEL_CONFIGS.keys()),
-                    help='run only this model; omit to run all')
+                    help='run only this model (within-model plots only); omit to run all')
 parser.add_argument('--bias', default=None, choices=BIAS_TYPES,
                     help='run only this domain; omit to run all four')
 parser.add_argument('--num_sample', type=int, default=None,
                     help='max cases per domain per kind (default: all)')
 parser.add_argument('--source', default='zip', choices=['zip', 'local', 'auto'],
-                    help='zip: always read from zip (recommended); '
-                         'local: read from extracted NFS files; '
-                         'auto: prefer local if extracted, else zip')
-parser.add_argument('--plots', nargs='+', default=['all'], choices=PLOT_CHOICES + ['all'],
-                    metavar='PLOT',
-                    help=('which plots to generate: bars, delta, compare, all (default: all). '
+                    help='data source for within-model plots: '
+                         'zip (recommended on deepfreeze), local (extracted NFS), '
+                         'auto (local if extracted, else zip). '
+                         'Cross-patch always reads from local filesystem.')
+parser.add_argument('--plots', nargs='+', default=['all'],
+                    choices=PLOT_CHOICES + ['all'], metavar='PLOT',
+                    help=('plots to generate (default: all). '
                           'bars = per-checkpoint bar charts + composites; '
-                          'delta = bias-acquired-per-step figure; '
-                          'compare = base vs instruct comparison.'))
+                          'delta = Δ signal between consecutive checkpoints; '
+                          'compare = base vs instruct comparison + trajectory; '
+                          'cross_patch = cross-model patching plots.'))
+parser.add_argument('--direction', default=None,
+                    choices=list(CROSS_PATCH_CONFIGS.keys()),
+                    help='cross-patch direction to run (default: both). '
+                         'Only used when cross_patch is in --plots.')
 args = parser.parse_args()
 
 _plots = set(args.plots)
 if 'all' in _plots:
     _plots = set(PLOT_CHOICES)
-RUN_BARS    = 'bars'    in _plots
-RUN_DELTA   = 'delta'   in _plots
-RUN_COMPARE = 'compare' in _plots
+RUN_BARS        = 'bars'        in _plots
+RUN_DELTA       = 'delta'       in _plots
+RUN_COMPARE     = 'compare'     in _plots
+RUN_CROSS_PATCH = 'cross_patch' in _plots
 
-models_to_run  = [args.model] if args.model else list(MODEL_CONFIGS.keys())
-domains_to_run = [args.bias]  if args.bias  else BIAS_TYPES
+models_to_run      = [args.model]     if args.model     else list(MODEL_CONFIGS.keys())
+domains_to_run     = [args.bias]      if args.bias       else BIAS_TYPES
+directions_to_run  = [args.direction] if args.direction  else list(CROSS_PATCH_CONFIGS.keys())
 
 # ── data helpers ──────────────────────────────────────────────────────────────
 
-def local_cases_dir(model_name, org, checkpoint, domain):
-    return os.path.join(LOCAL_BASE, org, model_name,
-                        checkpoint, domain, 'causal_trace', 'cases')
-
-def zip_cases_prefix(org, model_name, checkpoint, domain):
-    return f'results/{org}/{model_name}/{checkpoint}/{domain}/causal_trace/cases/'
-
-def partition_names(names):
-    single, attn, mlp = [], [], []
-    for n in names:
-        if '_attn.' in n:
-            attn.append(n)
-        elif '_mlp.' in n or '_intermediate.' in n:
-            mlp.append(n)
-        elif n.endswith('.npz'):
-            single.append(n)
-    return single, attn, mlp
-
-def _load_local(path):
-    return np.load(path, allow_pickle=True)
-
-def _load_zip(zf, zip_path):
-    with zf.open(zip_path) as f:
-        return np.load(io.BytesIO(f.read()), allow_pickle=True)
-
-def collect_scores(file_list, loader):
-    """
-    Returns:
-      bias_mean      (n_layers,)  mean score at subject token positions
-      pre_blank_mean (n_layers,)  mean score at token before prediction target
-      blank_mean     (n_layers,)  mean score at prediction target positions
-      n_cases        int          number of cases successfully loaded
-      mean_high      float        mean baseline (uncorrupted) score
-      mean_low       float        mean corrupted-only score
-    Returns (None,...) on failure.
-    """
-    bias_word, pre_blank, blank = [], [], []
-    highs, lows = [], []
-    for item in tqdm(file_list, leave=False):
-        try:
-            d = loader(item)
-            scores = d['scores']
-            for b, e in d['corrupt_range_anti']:
-                bias_word.append(scores[b:e])
-            idx0 = int(d['blank_idxs_anti'][0])
-            idx1 = int(d['blank_idxs_anti'][1]) if len(d['blank_idxs_anti']) > 1 else idx0 + 1
-            if idx0 > 0:
-                pre_blank.append(scores[idx0 - 1][np.newaxis, :])
-            blank.append(scores[idx0:idx1])
-            highs.append(float(d['high_score']))
-            lows.append(float(d['low_score']))
-        except Exception:
-            continue
-    if not bias_word:
-        return None, None, None, 0, 0.0, 0.0
-    n_layers = bias_word[0].shape[-1]
-    return (
-        np.mean(np.concatenate(bias_word, axis=0), axis=0),
-        np.mean(np.concatenate(pre_blank, axis=0), axis=0) if pre_blank
-            else np.zeros(n_layers),
-        np.mean(np.concatenate(blank,     axis=0), axis=0),
-        len(highs),
-        float(np.mean(highs)),
-        float(np.mean(lows)),
-    )
-
-# ── plotting helpers ──────────────────────────────────────────────────────────
-
-def _draw_bars(ax, r1, r2, r3, labels, colors, num_layer, xlabel, ylabel, title):
-    bar_width = 0.25
-    xs = np.arange(len(r1))
-    ax.bar(xs,               r1, color=colors[0], width=bar_width, edgecolor='gray', label=labels[0])
-    ax.bar(xs + bar_width,   r2, color=colors[1], width=bar_width, edgecolor='gray', label=labels[1])
-    ax.bar(xs + 2*bar_width, r3, color=colors[2], width=bar_width, edgecolor='gray', label=labels[2])
-    ax.set_xlabel(xlabel, fontweight='bold', fontsize=8)
-    ax.set_xticks(np.arange(0, num_layer, max(1, num_layer // 8)))
-    ax.set_ylabel(ylabel, fontsize=8)
-    ax.set_title(title, fontsize=9)
-    ax.legend(fontsize=6)
-    all_vals = np.concatenate([r1, r2, r3])
-    margin = (all_vals.max() - all_vals.min()) * 0.1 or 0.05
-    ax.set_ylim(all_vals.min() - margin, all_vals.max() + margin)
-
-def _savepdf(fig, path):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    fig.savefig(path, format='pdf', bbox_inches='tight')
-    plt.close(fig)
-    print(f'    Saved: {path}')
-
 def save_individual(r1, r2, r3, labels, colors, num_layer, title, savepath):
-    fig, ax = plt.subplots(figsize=(12, 5))
+    fig, ax = plt.subplots(figsize=(FIG_BAR_W_SINGLE, FIG_BAR_H_SINGLE))
     _draw_bars(ax, r1, r2, r3, labels, colors, num_layer,
-               'Layer', 'Abs. log prob diff (stereo − anti)', title)
+               'Layer', Y_LABEL_BARS, title)
     plt.tight_layout()
     _savepdf(fig, savepath)
 
 def save_composite(domain_data, plot_type, model_name, ckpt_label, out_dir):
-    """1×4 grid — all domains side-by-side for one checkpoint."""
+    """1×N grid — all domains side-by-side for one checkpoint."""
     domains = [d for d in BIAS_TYPES if d in domain_data]
     if not domains:
         return
     labels       = STATES_LABELS if plot_type == 'states' else WORDS_LABELS
     title_suffix = 'effect of states' if plot_type == 'states' else 'effect of different words'
-    fig, axes = plt.subplots(1, len(domains), figsize=(13, 4))
+    fig, axes = plt.subplots(1, len(domains),
+                             figsize=(FIG_BAR_W_PER_COL * len(domains), FIG_ROW_H))
     if len(domains) == 1:
         axes = [axes]
     fig.suptitle(f'Bias {title_suffix} — {model_name}  [{ckpt_label}]',
-                 fontsize=11, fontweight='bold')
+                 fontsize=FS_SUPTITLE, fontweight='bold')
     for ax, domain in zip(axes, domains):
         r1, r2, r3, nl = domain_data[domain]
         _draw_bars(ax, r1, r2, r3, labels, BAR_COLORS, nl,
-                   'Layer', 'Abs. log prob diff (stereo − anti)', domain.title())
+                   'Layer', Y_LABEL_BARS, domain.title())
     plt.tight_layout()
     _savepdf(fig, os.path.join(out_dir, f'composite-{plot_type}.pdf'))
 
 def save_composite_all(states_data, words_data, model_name, ckpt_label, out_dir):
-    """2×4 grid — top row=states, bottom row=words, columns=domains."""
+    """2×N grid — top row=states, bottom row=words, columns=domains."""
     domains = [d for d in BIAS_TYPES if d in states_data and d in words_data]
     if not domains:
         return
-    fig, axes = plt.subplots(2, len(domains), figsize=(13, 8))
+    fig, axes = plt.subplots(2, len(domains),
+                             figsize=(FIG_BAR_W_PER_COL * len(domains), FIG_ROW_H * 2))
     fig.suptitle(f'All bias domains — {model_name}  [{ckpt_label}]',
-                 fontsize=12, fontweight='bold')
+                 fontsize=FS_SUPTITLE, fontweight='bold')
     for col, domain in enumerate(domains):
         r1, r2, r3, nl = states_data[domain]
         _draw_bars(axes[0, col], r1, r2, r3, STATES_LABELS, BAR_COLORS, nl,
-                   'Layer', 'Abs. log prob diff (stereo − anti)', f'{domain.title()} — states')
+                   'Layer', Y_LABEL_BARS, f'{domain.title()} — states')
         r1, r2, r3, nl = words_data[domain]
         _draw_bars(axes[1, col], r1, r2, r3, WORDS_LABELS, BAR_COLORS, nl,
-                   'Layer', 'Abs. log prob diff (stereo − anti)', f'{domain.title()} — words')
+                   'Layer', Y_LABEL_BARS, f'{domain.title()} — words')
     plt.tight_layout()
     _savepdf(fig, os.path.join(out_dir, 'composite-all.pdf'))
 
@@ -278,14 +192,15 @@ def save_cross_checkpoint(domain_arrays, plot_type, model_name, domain, out_dir)
     labels = STATES_LABELS if plot_type == 'states' else WORDS_LABELS
     title_suffix = 'effect of states' if plot_type == 'states' else 'effect of different words'
 
-    fig, axes = plt.subplots(nrows, ncols, figsize=(14, 4 * nrows))
+    fig, axes = plt.subplots(nrows, ncols,
+                             figsize=(FIG_GRID_W_PER_COL * ncols, FIG_ROW_H * nrows))
     axes_flat = axes.flatten() if n > 1 else [axes]
     fig.suptitle(f'{domain.title()} bias {title_suffix} — {model_name} (all checkpoints)',
-                 fontsize=12, fontweight='bold')
+                 fontsize=FS_SUPTITLE, fontweight='bold')
 
     for i, (ckpt_label, r1, r2, r3, nl) in enumerate(domain_arrays):
         _draw_bars(axes_flat[i], r1, r2, r3, labels, BAR_COLORS, nl,
-                   'Layer', 'Abs. log prob diff (stereo − anti)', ckpt_label)
+                   'Layer', Y_LABEL_BARS, ckpt_label)
 
     for j in range(n, len(axes_flat)):
         axes_flat[j].set_visible(False)
@@ -315,7 +230,6 @@ def save_stats_and_report(model_name, all_ckpt_stats, out_dir):
     # report.md — human-readable summary
     md_path = os.path.join(out_dir, 'report.md')
     today   = datetime.date.today().isoformat()
-    LOW_SIGNAL_THRESHOLD = 0.03
     lines   = [
         f'# {model_name} — Bias Tracing Report',
         f'',
@@ -386,7 +300,7 @@ def save_stats_and_report(model_name, all_ckpt_stats, out_dir):
                 continue
             gap  = s['effect_gap']
             low  = s['mean_low']
-            flag = ' ⚠' if gap < LOW_SIGNAL_THRESHOLD else ''
+            flag = ' ⚠' if gap < LOW_SIGNAL else ''
             nl   = s['num_layers']
             mid  = nl // 2
             def nie(v): return (v - low) / gap if gap > 0 else 0.0
@@ -415,7 +329,6 @@ def save_stats_and_report(model_name, all_ckpt_stats, out_dir):
         f'⚠ Rows marked `[low-signal]` have gap < 0.03 — too small for reliable NIE estimates.',
         f'',
     ]
-    LOW_SIGNAL_THRESHOLD = 0.03
     for e in all_ckpt_stats:
         nl  = 16
         hdr = '| Domain | ' + ' | '.join(f'L{i}' for i in range(nl)) + ' |'
@@ -428,7 +341,7 @@ def save_stats_and_report(model_name, all_ckpt_stats, out_dir):
             else:
                 gap  = s['effect_gap']
                 low  = s['mean_low']
-                flag = '  ⚠ low-signal' if gap < LOW_SIGNAL_THRESHOLD else ''
+                flag = '  ⚠ low-signal' if gap < LOW_SIGNAL else ''
                 if gap > 0:
                     nie_vals = [(v - low) / gap for v in s['states_nie']]
                 else:
@@ -464,7 +377,6 @@ def save_stats_and_report(model_name, all_ckpt_stats, out_dir):
 
 # ── cross-model plot helpers ──────────────────────────────────────────────────
 
-LOW_SIGNAL = 0.03
 DOMAIN_COLORS = {'gender': '#2196F3', 'profession': '#4CAF50',
                  'race': '#FF5722', 'religion': '#9C27B0'}
 
@@ -549,7 +461,8 @@ def save_bias_delta(ckpt_stats_list, model_name, out_dir):
         n     = len(pairs)
         ncols = 2
         nrows = math.ceil(n / ncols)
-        fig, axes = plt.subplots(nrows, ncols, figsize=(14, 4 * nrows),
+        fig, axes = plt.subplots(nrows, ncols,
+                                 figsize=(FIG_GRID_W_PER_COL * ncols, FIG_ROW_H * nrows),
                                  constrained_layout=True)
         axes_flat = axes.flatten() if n > 1 else [axes]
 
@@ -557,7 +470,7 @@ def save_bias_delta(ckpt_stats_list, model_name, out_dir):
             f'{model_name} — {domain.capitalize()} bias: Δ per layer vs. previous checkpoint\n'
             'Bars show change in abs. log prob diff (curr − prev) at each layer. '
             'Positive = more causal effect acquired.  Y-axis fixed across all intervals.',
-            fontsize=11, fontweight='bold')
+            fontsize=FS_SUPTITLE, fontweight='bold')
 
         for ax, (pair_label, ds, da, dm, nl, low_sig) in zip(axes_flat, pairs):
             _draw_bars(ax, ds, da, dm, DELTA_LABELS, BAR_COLORS, nl,
@@ -565,9 +478,9 @@ def save_bias_delta(ckpt_stats_list, model_name, out_dir):
             ax.set_ylim(y_min, y_max)   # override per-subplot limits
             ax.axhline(0, color='black', linewidth=0.8, linestyle='--', zorder=0)
             if low_sig:
-                ax.set_facecolor('#FFF9C4')
+                ax.set_facecolor(LOW_SIG_BG)
                 ax.text(0.98, 0.97, '⚠ low-signal', transform=ax.transAxes,
-                        fontsize=7, ha='right', va='top', color='#B71C1C')
+                        fontsize=FS_ANNOT, ha='right', va='top', color=LOW_SIG_COLOR)
 
         for ax in axes_flat[n:]:
             ax.set_visible(False)
@@ -588,9 +501,6 @@ def save_bias_trajectory(base_stats, instruct_stats, out_dir):
     a vertical dashed line marks the phase boundary.
     Output: {domain}-bias-trajectory.pdf  (one per domain)
     """
-    BASE_COLOR     = '#1565C0'
-    INSTRUCT_COLOR = '#E65100'
-
     for domain in BIAS_TYPES:
         base_pts, instruct_pts = [], []
         for e in base_stats:
@@ -625,13 +535,13 @@ def save_bias_trajectory(base_stats, instruct_stats, out_dir):
         xs       = np.arange(n_total)
 
         fig, (ax_gap, ax_frac, ax_raw) = plt.subplots(
-            3, 1, figsize=(max(10, n_total * 1.4), 10),
+            3, 1, figsize=(max(10, n_total * 1.4), FIG_TRAJ_H),
             constrained_layout=True)
 
         fig.suptitle(
             f'OLMo-2-0425-1B — {domain.capitalize()} bias: learning trajectory\n'
             'Left: base pre-training checkpoints   |   Right: instruction fine-tuning',
-            fontsize=11, fontweight='bold')
+            fontsize=FS_SUPTITLE, fontweight='bold')
 
         panel_specs = [
             (ax_gap, gaps,
@@ -665,13 +575,13 @@ def save_bias_trajectory(base_stats, instruct_stats, out_dir):
                 if ls:
                     ax.annotate('⚠', (xs[xi], vals[xi]),
                                 textcoords='offset points', xytext=(0, 6),
-                                ha='center', fontsize=9, color='#B71C1C')
+                                ha='center', fontsize=FS_LABEL, color=LOW_SIG_COLOR)
 
             ax.set_xticks(xs)
-            ax.set_xticklabels(labels, rotation=40, ha='right', fontsize=8)
-            ax.set_ylabel(ylabel, fontsize=9)
-            ax.set_title(title, fontsize=9)
-            ax.legend(fontsize=9)
+            ax.set_xticklabels(labels, rotation=40, ha='right', fontsize=FS_TICK)
+            ax.set_ylabel(ylabel, fontsize=FS_LABEL)
+            ax.set_title(title, fontsize=FS_TITLE)
+            ax.legend(fontsize=FS_LEGEND)
             ax.grid(axis='y', alpha=0.25)
             ax.axhline(0, color='black', linewidth=0.7, alpha=0.3)
 
@@ -688,8 +598,6 @@ def save_base_vs_instruct(base_stats, instruct_stats, out_dir):
     Subplots arranged in 2 columns, labeled '[Base]' or '[Instruct]'.
     Y-axis fixed across all subplots for direct comparison.
     """
-    BAR_LABELS = ['Effect of single state', 'Effect with Attn severed', 'Effect with MLP severed']
-
     def raw_arrays(s):
         """Return (states, mlp_only, attn_only) raw log prob diff arrays.
         Order matches bar chart convention:
@@ -738,7 +646,8 @@ def save_base_vs_instruct(base_stats, instruct_stats, out_dir):
         n     = len(subplots)
         ncols = 2
         nrows = math.ceil(n / ncols)
-        fig, axes = plt.subplots(nrows, ncols, figsize=(14, 4 * nrows),
+        fig, axes = plt.subplots(nrows, ncols,
+                                 figsize=(FIG_GRID_W_PER_COL * ncols, FIG_ROW_H * nrows),
                                  constrained_layout=True)
         axes_flat = axes.flatten() if n > 1 else [axes]
 
@@ -746,23 +655,269 @@ def save_base_vs_instruct(base_stats, instruct_stats, out_dir):
             f'OLMo-2-0425-1B — {domain.capitalize()} bias: Base vs. Instruct\n'
             'Abs. log prob diff per layer  (blue = States, red = Attn severed, green = MLP severed)  '
             'Y-axis fixed across all subplots.',
-            fontsize=11, fontweight='bold')
+            fontsize=FS_SUPTITLE, fontweight='bold')
 
         for ax, (title, s, a, m, nl, low_sig) in zip(axes_flat, subplots):
-            _draw_bars(ax, s, a, m, BAR_LABELS, BAR_COLORS, nl,
-                       'Layer', 'Abs. log prob diff (stereo − anti)', title)
+            _draw_bars(ax, s, a, m, STATES_LABELS, BAR_COLORS, nl,
+                       'Layer', Y_LABEL_BARS, title)
             ax.set_ylim(y_min, y_max)
             ax.axhline(0, color='black', linewidth=0.8, linestyle='--', zorder=0)
             if low_sig:
-                ax.set_facecolor('#FFF9C4')
+                ax.set_facecolor(LOW_SIG_BG)
                 ax.text(0.98, 0.97, '⚠ low-signal', transform=ax.transAxes,
-                        fontsize=7, ha='right', va='top', color='#B71C1C')
+                        fontsize=FS_ANNOT, ha='right', va='top', color=LOW_SIG_COLOR)
 
         for ax in axes_flat[n:]:
             ax.set_visible(False)
 
         out = os.path.join(out_dir, f'{domain}-base-vs-instruct.pdf')
         _savepdf(fig, out)
+
+
+# ── cross-patch functions ─────────────────────────────────────────────────────
+#
+# Cross-model patching injects activations from a *source* model into a *target*
+# model at one (token, layer) position at a time and measures how much the
+# prediction recovers toward the source model's bias-consistent output.
+#
+# Data format is identical to within-model causal tracing (.npz files with the
+# same keys: scores, corrupt_range_anti, blank_idxs_anti, high_score, low_score).
+# File naming uses the same _{attn,mlp}.npz suffix convention, so partition_names
+# and collect_scores work without modification.
+#
+# Data lives at CROSS_PATCH_BASE/{direction_dir}/{domain}/causal_trace/cases/
+# (local filesystem, not in the zip — always read with load_npz_local).
+
+def load_cross_patch_domain(direction_key, domain, num_sample=None):
+    """
+    Load cross-patch .npz files for one (direction, domain) pair.
+
+    direction_key : key in CROSS_PATCH_CONFIGS ('pre_to_post' or 'post_to_pre')
+    domain        : one of BIAS_TYPES
+    num_sample    : max files per kind (None = all)
+
+    Returns a result dict or None if no data is available:
+      bias_mean, pre_blank_mean, blank_mean  — (n_layers,) subject / word arrays
+      attn_mean, mlp_mean                    — Attn-only / MLP-only restore arrays
+      n_cases, mean_high, mean_low           — scalar summary stats
+      effect_gap                             — mean_high − mean_low
+      low_sig                                — True if effect_gap < LOW_SIGNAL
+      num_layer                              — number of transformer layers
+    """
+    cfg       = CROSS_PATCH_CONFIGS[direction_key]
+    cases_dir = os.path.join(CROSS_PATCH_BASE, cfg['dir'], domain, 'causal_trace', 'cases')
+
+    if not os.path.isdir(cases_dir):
+        print(f'    [cross_patch] No directory: {cases_dir}')
+        return None
+
+    all_files = sorted(os.listdir(cases_dir))
+    single_b, attn_b, mlp_b = partition_names(all_files)
+
+    single_items = [os.path.join(cases_dir, b) for b in single_b[:num_sample]]
+    attn_items   = [os.path.join(cases_dir, b) for b in attn_b[:num_sample]]
+    mlp_items    = [os.path.join(cases_dir, b) for b in mlp_b[:num_sample]]
+
+    print(f'    single={len(single_items)}, attn={len(attn_items)}, mlp={len(mlp_items)}')
+
+    if not single_items:
+        print('    No single-state files; skipping.')
+        return None
+
+    try:
+        num_layer = load_npz_local(single_items[0])['scores'].shape[-1]
+    except Exception as ex:
+        print(f'    Cannot read sample: {ex}; skipping.')
+        return None
+
+    bias_mean, pre_blank_mean, blank_mean, n_cases, mean_high, mean_low = \
+        collect_scores(single_items, load_npz_local)
+    attn_mean, _, _, _, _, _ = collect_scores(attn_items, load_npz_local)
+    mlp_mean,  _, _, _, _, _ = collect_scores(mlp_items,  load_npz_local)
+
+    if bias_mean is None:
+        print('    No valid scores; skipping.')
+        return None
+
+    zero           = np.zeros(num_layer)
+    attn_mean      = attn_mean      if attn_mean      is not None else zero
+    mlp_mean       = mlp_mean       if mlp_mean       is not None else zero
+    pre_blank_mean = pre_blank_mean if pre_blank_mean is not None else zero
+    blank_mean     = blank_mean     if blank_mean     is not None else zero
+
+    effect_gap = mean_high - mean_low
+    return {
+        'bias_mean':      bias_mean,
+        'pre_blank_mean': pre_blank_mean,
+        'blank_mean':     blank_mean,
+        'attn_mean':      attn_mean,
+        'mlp_mean':       mlp_mean,
+        'n_cases':        n_cases,
+        'mean_high':      mean_high,
+        'mean_low':       mean_low,
+        'effect_gap':     effect_gap,
+        'low_sig':        effect_gap < LOW_SIGNAL,
+        'num_layer':      num_layer,
+    }
+
+
+def save_cross_patch_direction(direction_key, domain_results, out_dir):
+    """
+    Per-direction individual PDFs + composite figures.
+
+    domain_results : {domain: result_dict from load_cross_patch_domain}
+    out_dir        : plots/cross_patch/{direction_key}/
+
+    Mirrors the per-checkpoint layout used for within-model tracing:
+      {domain}-states.pdf      full / Attn-severed / MLP-severed bars per layer
+      {domain}-words.pdf       bias-word / pre-blank / blank-token bars per layer
+      composite-states.pdf     all 4 domains side-by-side
+      composite-words.pdf
+      composite-all.pdf        2×N grid: top=states, bottom=words
+    """
+    cfg   = CROSS_PATCH_CONFIGS[direction_key]
+    label = cfg['label']
+    desc  = cfg['desc']
+
+    def _low_sig_decorate(ax, res):
+        """Add ⚠ annotation and background tint for low-signal panels."""
+        if res['low_sig']:
+            ax.set_facecolor(LOW_SIG_BG)
+            ax.text(0.98, 0.97, '⚠ low-signal', transform=ax.transAxes,
+                    fontsize=FS_ANNOT, ha='right', va='top', color=LOW_SIG_COLOR)
+
+    # ── individual PDFs per domain ────────────────────────────────────────────
+    for domain, res in domain_results.items():
+        nl       = res['num_layer']
+        sig_flag = ' [low-signal]' if res['low_sig'] else ''
+
+        for plot_type, r2, r3, labels_list in [
+            ('states', res['mlp_mean'],       res['attn_mean'],  STATES_LABELS),
+            ('words',  res['pre_blank_mean'], res['blank_mean'], WORDS_LABELS),
+        ]:
+            fig, ax = plt.subplots(figsize=(FIG_BAR_W_SINGLE, FIG_BAR_H_SINGLE))
+            _draw_bars(ax, res['bias_mean'], r2, r3, labels_list, BAR_COLORS, nl,
+                       'Layer', Y_LABEL_BARS,
+                       f'{domain.title()} — {label}{sig_flag}\n{desc}')
+            ax.axhline(0, color='black', linewidth=0.8, linestyle='--', zorder=0)
+            _low_sig_decorate(ax, res)
+            plt.tight_layout()
+            _savepdf(fig, os.path.join(out_dir, f'{domain}-{plot_type}.pdf'))
+
+    # ── composite figures ─────────────────────────────────────────────────────
+    if not domain_results:
+        return
+
+    domains = [d for d in BIAS_TYPES if d in domain_results]
+
+    for plot_type, labels_list in [('states', STATES_LABELS), ('words', WORDS_LABELS)]:
+        fig, axes = plt.subplots(1, len(domains),
+                                 figsize=(FIG_BAR_W_PER_COL * len(domains), FIG_ROW_H))
+        if len(domains) == 1:
+            axes = [axes]
+        fig.suptitle(f'Cross-patch {label} — {plot_type.title()}\n{desc}',
+                     fontsize=FS_SUPTITLE, fontweight='bold')
+        for ax, domain in zip(axes, domains):
+            res = domain_results[domain]
+            if plot_type == 'states':
+                r2, r3 = res['mlp_mean'], res['attn_mean']
+            else:
+                r2, r3 = res['pre_blank_mean'], res['blank_mean']
+            _draw_bars(ax, res['bias_mean'], r2, r3, labels_list, BAR_COLORS, res['num_layer'],
+                       'Layer', Y_LABEL_BARS, domain.title())
+            ax.axhline(0, color='black', linewidth=0.8, linestyle='--', zorder=0)
+            _low_sig_decorate(ax, res)
+        plt.tight_layout()
+        _savepdf(fig, os.path.join(out_dir, f'composite-{plot_type}.pdf'))
+
+    # 2×N grid: top row = states, bottom row = words
+    fig, axes = plt.subplots(2, len(domains),
+                             figsize=(FIG_BAR_W_PER_COL * len(domains), FIG_ROW_H * 2))
+    if len(domains) == 1:
+        axes = axes[:, np.newaxis]
+    fig.suptitle(f'Cross-patch {label} — All bias domains\n{desc}',
+                 fontsize=FS_SUPTITLE, fontweight='bold')
+    for col, domain in enumerate(domains):
+        res = domain_results[domain]
+        _draw_bars(axes[0, col],
+                   res['bias_mean'], res['mlp_mean'], res['attn_mean'],
+                   STATES_LABELS, BAR_COLORS, res['num_layer'],
+                   'Layer', Y_LABEL_BARS, f'{domain.title()} — states')
+        _draw_bars(axes[1, col],
+                   res['bias_mean'], res['pre_blank_mean'], res['blank_mean'],
+                   WORDS_LABELS, BAR_COLORS, res['num_layer'],
+                   'Layer', Y_LABEL_BARS, f'{domain.title()} — words')
+        for row in range(2):
+            axes[row, col].axhline(0, color='black', linewidth=0.8, linestyle='--', zorder=0)
+            _low_sig_decorate(axes[row, col], res)
+    plt.tight_layout()
+    _savepdf(fig, os.path.join(out_dir, 'composite-all.pdf'))
+
+
+def save_cross_patch_comparison(all_direction_results, domains, out_dir):
+    """
+    Side-by-side comparison of both cross-patch directions for each domain.
+    Y-axis is fixed across directions so the plots are directly comparable.
+
+    all_direction_results : {direction_key: {domain: result_dict}}
+    domains               : list of domains to include
+    out_dir               : plots/cross_patch/
+
+    Outputs:
+      {domain}-directions-states.pdf   pre→post vs post→pre (states restore)
+      {domain}-directions-words.pdf    pre→post vs post→pre (word-token positions)
+    """
+    direction_keys = list(all_direction_results.keys())
+
+    for plot_type in ('states', 'words'):
+        labels_list = STATES_LABELS if plot_type == 'states' else WORDS_LABELS
+
+        for domain in domains:
+            # collect one subplot per direction that has data for this domain
+            subplots = []
+            for dk in direction_keys:
+                res = all_direction_results[dk].get(domain)
+                if res is None:
+                    continue
+                dir_label = CROSS_PATCH_CONFIGS[dk]['label']
+                if plot_type == 'states':
+                    r2, r3 = res['mlp_mean'], res['attn_mean']
+                else:
+                    r2, r3 = res['pre_blank_mean'], res['blank_mean']
+                subplots.append((dir_label, res['bias_mean'], r2, r3,
+                                 res['num_layer'], res['low_sig']))
+
+            if not subplots:
+                continue
+
+            # shared Y-axis so both directions are directly comparable
+            all_vals = np.concatenate([np.concatenate([r1, r2, r3])
+                                       for _, r1, r2, r3, _, _ in subplots])
+            margin = (np.nanmax(all_vals) - np.nanmin(all_vals)) * 0.12 or 0.05
+            y_min, y_max = np.nanmin(all_vals) - margin, np.nanmax(all_vals) + margin
+
+            n = len(subplots)
+            fig, axes = plt.subplots(1, n,
+                                     figsize=(FIG_GRID_W_PER_COL * n, FIG_ROW_H))
+            if n == 1:
+                axes = [axes]
+            fig.suptitle(
+                f'Cross-patch comparison — {domain.capitalize()} bias ({plot_type})\n'
+                'Y-axis fixed across directions for direct comparison.',
+                fontsize=FS_SUPTITLE, fontweight='bold')
+
+            for ax, (dir_label, r1, r2, r3, nl, low_sig) in zip(axes, subplots):
+                _draw_bars(ax, r1, r2, r3, labels_list, BAR_COLORS, nl,
+                           'Layer', Y_LABEL_BARS, dir_label)
+                ax.set_ylim(y_min, y_max)
+                ax.axhline(0, color='black', linewidth=0.8, linestyle='--', zorder=0)
+                if low_sig:
+                    ax.set_facecolor(LOW_SIG_BG)
+                    ax.text(0.98, 0.97, '⚠ low-signal', transform=ax.transAxes,
+                            fontsize=FS_ANNOT, ha='right', va='top', color=LOW_SIG_COLOR)
+
+            plt.tight_layout()
+            _savepdf(fig, os.path.join(out_dir, f'{domain}-directions-{plot_type}.pdf'))
 
 
 # ── main loop ─────────────────────────────────────────────────────────────────
@@ -775,7 +930,7 @@ all_models_stats = {}  # accumulate for cross-model plots
 
 for model_name in models_to_run:
     cfg = MODEL_CONFIGS[model_name]
-    org = cfg['zip_org']
+    org = cfg['org']
 
     model_out_dir  = os.path.join(PLOTS_BASE, model_name)
     all_ckpt_stats = []
@@ -805,7 +960,7 @@ for model_name in models_to_run:
                 single_items = [os.path.join(local_dir, b) for b in single_b[:args.num_sample]]
                 attn_items   = [os.path.join(local_dir, b) for b in attn_b[:args.num_sample]]
                 mlp_items    = [os.path.join(local_dir, b) for b in mlp_b[:args.num_sample]]
-                loader       = _load_local
+                loader       = load_npz_local
                 print(f'    [local NFS]')
             else:
                 prefix    = zip_cases_prefix(org, model_name, checkpoint, domain)
@@ -820,7 +975,7 @@ for model_name in models_to_run:
                 single_items = [name_map[b] for b in single_b[:args.num_sample] if b in name_map]
                 attn_items   = [name_map[b] for b in attn_b[:args.num_sample]   if b in name_map]
                 mlp_items    = [name_map[b] for b in mlp_b[:args.num_sample]    if b in name_map]
-                loader       = lambda p: _load_zip(zf, p)
+                loader       = lambda p: load_npz_zip(zf, p)
                 print(f'    [zip]')
 
             print(f'    single={len(single_items)}, attn={len(attn_items)}, mlp={len(mlp_items)}')
@@ -926,16 +1081,51 @@ zf.close()
 BASE     = 'OLMo-2-0425-1B'
 INSTRUCT = 'OLMo-2-0425-1B-Instruct'
 if RUN_COMPARE and BASE in all_models_stats and INSTRUCT in all_models_stats:
-    print(f'\n  Generating base vs instruct comparison...')
+    compare_dir = os.path.join(PLOTS_BASE, 'compare')
+    os.makedirs(compare_dir, exist_ok=True)
+    print(f'\n  Generating base vs instruct comparison → plots/compare/')
     save_bias_trajectory(
         all_models_stats[BASE],
         all_models_stats[INSTRUCT],
-        PLOTS_BASE,
+        compare_dir,
     )
     save_base_vs_instruct(
         all_models_stats[BASE],
         all_models_stats[INSTRUCT],
-        PLOTS_BASE,
+        compare_dir,
     )
+
+# ── cross-patch execution block ───────────────────────────────────────────────
+if RUN_CROSS_PATCH:
+    print('\n=== Cross-patch plots ===')
+    cross_patch_out = os.path.join(PLOTS_BASE, 'cross_patch')
+    os.makedirs(cross_patch_out, exist_ok=True)
+
+    all_direction_results = {}  # {direction_key: {domain: result_dict}}
+
+    for direction_key in directions_to_run:
+        cfg_cp = CROSS_PATCH_CONFIGS[direction_key]
+        print(f'\n  Direction: {cfg_cp["label"]}  ({cfg_cp["desc"]})')
+
+        dir_out = os.path.join(cross_patch_out, direction_key)
+        os.makedirs(dir_out, exist_ok=True)
+
+        domain_results = {}
+        for domain in domains_to_run:
+            print(f'  {domain}')
+            res = load_cross_patch_domain(direction_key, domain, args.num_sample)
+            if res is not None:
+                domain_results[domain] = res
+
+        if domain_results:
+            save_cross_patch_direction(direction_key, domain_results, dir_out)
+            all_direction_results[direction_key] = domain_results
+
+    # comparison plot — requires both directions to have results
+    if len(all_direction_results) >= 2:
+        print('\n  Generating direction-comparison plots...')
+        save_cross_patch_comparison(all_direction_results, domains_to_run, cross_patch_out)
+    elif len(all_direction_results) == 1:
+        print('\n  Only one direction has data — skipping comparison plots.')
 
 print('\nDone.')

@@ -13,7 +13,10 @@ Usage:
     python scripts/regenerate_compare_plots.py
 """
 
+import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import json
 import math
 import numpy as np
@@ -22,12 +25,14 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 
-PLOTS_BASE = '/deepfreeze/aag026/Aaryan2/BiasEdit/bias_tracing/plots'
-BASE_MODEL  = 'OLMo-2-0425-1B'
-INST_MODEL  = 'OLMo-2-0425-1B-Instruct'
-PYTHIA      = 'pythia-1b'
-BIAS_TYPES  = ['gender', 'profession', 'race', 'religion']
-LOW_SIGNAL  = 0.03
+from plot_utils import (
+    PLOTS_BASE, BASE_MODEL, INST_MODEL, PYTHIA,
+    BIAS_TYPES, LOW_SIGNAL, BAR_COLORS, Y_LABEL_BARS, STATES_LABELS,
+    FS_SUPTITLE, FS_TITLE, FS_LABEL, FS_TICK, FS_LEGEND, FS_ANNOT,
+    FIG_GRID_W_PER_COL, FIG_ROW_H, FIG_LINE_W_PER_PAN, FIG_TRAJ_H,
+    BASE_COLOR, INSTRUCT_COLOR, LOW_SIG_COLOR, LOW_SIG_BG,
+    _draw_bars, _savepdf,
+)
 
 PANELS = [
     ('states_nie', 'States (full restore)'),
@@ -42,15 +47,8 @@ def _load(model):
     return json.load(open(p))['checkpoints']
 
 
-def _savefig(fig, path):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    fig.savefig(path, format='pdf', bbox_inches='tight')
-    plt.close(fig)
-    print(f'Saved: {path}')
-
-
 def _checkpoint_colors(n, cmap_name='viridis'):
-    cmap = cm.get_cmap(cmap_name, n)
+    cmap = matplotlib.colormaps[cmap_name].resampled(n)
     return [cmap(i) for i in range(n)]
 
 
@@ -66,12 +64,13 @@ def save_line_checkpoints(ckpt_stats, model_name, out_dir, cmap='viridis'):
     colors  = _checkpoint_colors(n_ckpts, cmap)
 
     for domain in BIAS_TYPES:
-        fig, axes = plt.subplots(1, 3, figsize=(15, 4), constrained_layout=True)
+        fig, axes = plt.subplots(1, 3, figsize=(FIG_LINE_W_PER_PAN * 3, FIG_ROW_H),
+                                 constrained_layout=True)
         fig.suptitle(
             f'{model_name} — {domain.capitalize()} bias: layer profile across checkpoints\n'
             'Each line = one checkpoint (light→dark = early→late training). '
             'X = layer, Y = abs. log prob diff (stereo − anti).',
-            fontsize=11, fontweight='bold')
+            fontsize=FS_SUPTITLE, fontweight='bold')
 
         # collect y-range across all panels for shared axis
         all_vals = []
@@ -102,23 +101,23 @@ def save_line_checkpoints(ckpt_stats, model_name, out_dir, cmap='viridis'):
                         label=e['label'], zorder=i + 1)
                 ax.plot(0, scores[0], 'o', color=colors[i], markersize=5, zorder=i + 1)
 
-            ax.set_title(panel_title, fontsize=10)
-            ax.set_xlabel('Layer', fontsize=9)
-            ax.set_ylabel('Abs. log prob diff (stereo − anti)', fontsize=9)
+            ax.set_title(panel_title, fontsize=FS_TITLE)
+            ax.set_xlabel('Layer', fontsize=FS_LABEL)
+            ax.set_ylabel(Y_LABEL_BARS, fontsize=FS_LABEL)
             ax.set_ylim(y_min, y_max)
             ax.axhline(0, color='black', linewidth=0.6, alpha=0.3)
             ax.grid(alpha=0.2)
 
         # single shared legend on the last panel
         handles, labels = axes[-1].get_legend_handles_labels()
-        axes[-1].legend(handles, labels, fontsize=7, loc='upper right')
+        axes[-1].legend(handles, labels, fontsize=FS_LEGEND, loc='upper right')
 
         # dashed = low-signal note
         axes[0].text(0.02, 0.03, 'dashed = low-signal gap (<0.03)',
-                     transform=axes[0].transAxes, fontsize=7, color='gray')
+                     transform=axes[0].transAxes, fontsize=FS_ANNOT, color='gray')
 
         path = os.path.join(out_dir, f'{domain}-line-checkpoints.pdf')
-        _savefig(fig, path)
+        _savepdf(fig, path)
 
 
 # ── base vs instruct side-by-side line plot ────────────────────────────────────
@@ -139,11 +138,12 @@ def save_base_vs_instruct_lines(base_stats, instruct_stats, out_dir):
     instruct_colors = [cm.Oranges(0.45 + 0.45 * i / max(n_instruct - 1, 1)) for i in range(n_instruct)]
 
     for domain in BIAS_TYPES:
-        fig, axes = plt.subplots(1, 3, figsize=(15, 4), constrained_layout=True)
+        fig, axes = plt.subplots(1, 3, figsize=(FIG_LINE_W_PER_PAN * 3, FIG_ROW_H),
+                                 constrained_layout=True)
         fig.suptitle(
             f'OLMo-2-0425-1B — {domain.capitalize()} bias: Base (solid) vs Instruct (dashed)\n'
             'Each line = one checkpoint. X = layer, Y = abs. log prob diff (stereo − anti). Y-axis shared.',
-            fontsize=11, fontweight='bold')
+            fontsize=FS_SUPTITLE, fontweight='bold')
 
         all_vals = []
         for key, _ in PANELS:
@@ -181,19 +181,19 @@ def save_base_vs_instruct_lines(base_stats, instruct_stats, out_dir):
                         label=f'[I] {e["label"]}', zorder=n_base + i + 1)
                 ax.plot(0, scores[0], 's', color=instruct_colors[i], markersize=5)
 
-            ax.set_title(panel_title, fontsize=10)
-            ax.set_xlabel('Layer', fontsize=9)
-            ax.set_ylabel('Abs. log prob diff (stereo − anti)', fontsize=9)
+            ax.set_title(panel_title, fontsize=FS_TITLE)
+            ax.set_xlabel('Layer', fontsize=FS_LABEL)
+            ax.set_ylabel(Y_LABEL_BARS, fontsize=FS_LABEL)
             ax.set_ylim(y_min, y_max)
             ax.axhline(0, color='black', linewidth=0.6, alpha=0.3)
             ax.grid(alpha=0.2)
 
         handles, labels = axes[-1].get_legend_handles_labels()
-        axes[-1].legend(handles, labels, fontsize=7, loc='upper right',
-                        title='[B]=Base  [I]=Instruct', title_fontsize=7)
+        axes[-1].legend(handles, labels, fontsize=FS_LEGEND, loc='upper right',
+                        title='[B]=Base  [I]=Instruct', title_fontsize=FS_LEGEND)
 
         path = os.path.join(out_dir, f'{domain}-base-vs-instruct-lines.pdf')
-        _savefig(fig, path)
+        _savepdf(fig, path)
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -201,6 +201,9 @@ def save_base_vs_instruct_lines(base_stats, instruct_stats, out_dir):
 base_stats     = _load(BASE_MODEL)
 instruct_stats = _load(INST_MODEL)
 pythia_stats   = _load(PYTHIA)
+
+COMPARE_DIR = os.path.join(PLOTS_BASE, 'compare')
+os.makedirs(COMPARE_DIR, exist_ok=True)
 
 print('=== OLMo base: line plots per domain ===')
 save_line_checkpoints(base_stats, BASE_MODEL,
@@ -215,26 +218,10 @@ save_line_checkpoints(pythia_stats, PYTHIA,
                       os.path.join(PLOTS_BASE, PYTHIA), cmap='Greens')
 
 print('\n=== Base vs Instruct: side-by-side line plots ===')
-save_base_vs_instruct_lines(base_stats, instruct_stats, PLOTS_BASE)
+save_base_vs_instruct_lines(base_stats, instruct_stats, COMPARE_DIR)
 
 
 # ── bar-chart style base vs instruct (regenerate {domain}-base-vs-instruct.pdf) ──
-
-def _draw_bars(ax, r1, r2, r3, labels, colors, nl, xlabel, ylabel, title):
-    bw = 0.25
-    xs = np.arange(len(r1))
-    ax.bar(xs,          r1, width=bw, color=colors[0], edgecolor='gray', label=labels[0])
-    ax.bar(xs + bw,     r2, width=bw, color=colors[1], edgecolor='gray', label=labels[1])
-    ax.bar(xs + 2 * bw, r3, width=bw, color=colors[2], edgecolor='gray', label=labels[2])
-    ax.set_xlabel(xlabel, fontweight='bold', fontsize=8)
-    ax.set_ylabel(ylabel, fontsize=8)
-    ax.set_title(title, fontsize=9)
-    ax.legend(fontsize=6)
-    ax.set_xticks(np.arange(0, nl, max(1, nl // 8)))
-
-BAR_LABELS  = ['Effect of single state', 'Effect with Attn severed', 'Effect with MLP severed']
-BAR_COLORS  = ['#2196F3', '#F44336', '#4CAF50']
-Y_LABEL     = 'Abs. log prob diff (stereo − anti)'
 
 def save_base_vs_instruct_bars(base_stats, instruct_stats, out_dir):
     for domain in BIAS_TYPES:
@@ -265,32 +252,34 @@ def save_base_vs_instruct_bars(base_stats, instruct_stats, out_dir):
         n     = len(subplots)
         ncols = 2
         nrows = math.ceil(n / ncols)
-        fig, axes = plt.subplots(nrows, ncols, figsize=(14, 4 * nrows), constrained_layout=True)
+        fig, axes = plt.subplots(nrows, ncols,
+                                 figsize=(FIG_GRID_W_PER_COL * ncols, FIG_ROW_H * nrows),
+                                 constrained_layout=True)
         axes_flat = axes.flatten() if n > 1 else [axes]
 
         fig.suptitle(
             f'OLMo-2-0425-1B — {domain.capitalize()} bias: Base vs Instruct\n'
-            f'Y-axis: {Y_LABEL}. Fixed across all subplots.',
-            fontsize=11, fontweight='bold')
+            f'Y-axis: {Y_LABEL_BARS}. Fixed across all subplots.',
+            fontsize=FS_SUPTITLE, fontweight='bold')
 
         for ax, (title, s, a, m, nl, low_sig) in zip(axes_flat, subplots):
-            _draw_bars(ax, s, a, m, BAR_LABELS, BAR_COLORS, nl, 'Layer', Y_LABEL, title)
+            _draw_bars(ax, s, a, m, STATES_LABELS, BAR_COLORS, nl, 'Layer', Y_LABEL_BARS, title)
             ax.set_ylim(y_min, y_max)
             ax.axhline(0, color='black', linewidth=0.8, linestyle='--', zorder=0)
             if low_sig:
-                ax.set_facecolor('#FFF9C4')
+                ax.set_facecolor(LOW_SIG_BG)
                 ax.text(0.98, 0.97, '⚠ low-signal', transform=ax.transAxes,
-                        fontsize=7, ha='right', va='top', color='#B71C1C')
+                        fontsize=FS_ANNOT, ha='right', va='top', color=LOW_SIG_COLOR)
 
         for ax in axes_flat[n:]:
             ax.set_visible(False)
 
         path = os.path.join(out_dir, f'{domain}-base-vs-instruct.pdf')
-        _savefig(fig, path)
+        _savepdf(fig, path)
 
 
 print('\n=== Base vs Instruct: bar chart plots ===')
-save_base_vs_instruct_bars(base_stats, instruct_stats, PLOTS_BASE)
+save_base_vs_instruct_bars(base_stats, instruct_stats, COMPARE_DIR)
 
 
 # ── OLMo vs Pythia cross-model line plot ──────────────────────────────────────
@@ -307,11 +296,12 @@ def save_olmo_vs_pythia(olmo_stats, pythia_stats, out_dir):
     pythia_colors = [cm.Greens(0.35 + 0.55 * i / max(n_pythia - 1, 1)) for i in range(n_pythia)]
 
     for domain in BIAS_TYPES:
-        fig, axes = plt.subplots(1, 3, figsize=(15, 4), constrained_layout=True)
+        fig, axes = plt.subplots(1, 3, figsize=(FIG_LINE_W_PER_PAN * 3, FIG_ROW_H),
+                                 constrained_layout=True)
         fig.suptitle(
             f'OLMo-2-0425-1B vs Pythia-1B — {domain.capitalize()} bias: cross-architecture comparison\n'
             'Solid blue = OLMo checkpoints, dashed green = Pythia checkpoints. Y-axis shared.',
-            fontsize=11, fontweight='bold')
+            fontsize=FS_SUPTITLE, fontweight='bold')
 
         all_vals = []
         for key, _ in PANELS:
@@ -346,25 +336,25 @@ def save_olmo_vs_pythia(olmo_stats, pythia_stats, out_dir):
                         label=f'[Pythia] {e["label"]}')
                 ax.plot(0, scores[0], 's', color=pythia_colors[i], markersize=5)
 
-            ax.set_title(panel_title, fontsize=10)
-            ax.set_xlabel('Layer', fontsize=9)
-            ax.set_ylabel('Abs. log prob diff (stereo − anti)', fontsize=9)
+            ax.set_title(panel_title, fontsize=FS_TITLE)
+            ax.set_xlabel('Layer', fontsize=FS_LABEL)
+            ax.set_ylabel(Y_LABEL_BARS, fontsize=FS_LABEL)
             ax.set_ylim(y_min, y_max)
             ax.axhline(0, color='black', linewidth=0.6, alpha=0.3)
             ax.grid(alpha=0.2)
 
         handles, labels = axes[-1].get_legend_handles_labels()
-        axes[-1].legend(handles, labels, fontsize=6, loc='upper right',
-                        title='[OLMo]=solid  [Pythia]=dashed', title_fontsize=6)
+        axes[-1].legend(handles, labels, fontsize=FS_LEGEND, loc='upper right',
+                        title='[OLMo]=solid  [Pythia]=dashed', title_fontsize=FS_LEGEND)
         axes[0].text(0.02, 0.03, 'dotted/dashed = low-signal (<0.03 gap)',
-                     transform=axes[0].transAxes, fontsize=7, color='gray')
+                     transform=axes[0].transAxes, fontsize=FS_ANNOT, color='gray')
 
         path = os.path.join(out_dir, f'{domain}-olmo-vs-pythia.pdf')
-        _savefig(fig, path)
+        _savepdf(fig, path)
 
 
 print('\n=== OLMo vs Pythia: cross-architecture line plots ===')
-save_olmo_vs_pythia(base_stats, pythia_stats, PLOTS_BASE)
+save_olmo_vs_pythia(base_stats, pythia_stats, COMPARE_DIR)
 
 
 # ── Bias trajectory (effect gap + raw L0 signal over training) ───────────────
@@ -379,9 +369,6 @@ def save_bias_trajectory(base_stats, instruct_stats, out_dir):
     Base checkpoints on the left; instruct fine-tuning on the right.
     A vertical dashed line marks the phase boundary.
     """
-    BASE_COLOR     = '#1565C0'
-    INSTRUCT_COLOR = '#E65100'
-
     for domain in BIAS_TYPES:
         base_pts, instruct_pts = [], []
         for e in base_stats:
@@ -416,13 +403,13 @@ def save_bias_trajectory(base_stats, instruct_stats, out_dir):
         xs       = np.arange(n_total)
 
         fig, (ax_gap, ax_frac, ax_raw) = plt.subplots(
-            3, 1, figsize=(max(10, n_total * 1.4), 10),
+            3, 1, figsize=(max(10, n_total * 1.4), FIG_TRAJ_H),
             constrained_layout=True)
 
         fig.suptitle(
             f'OLMo-2-0425-1B — {domain.capitalize()} bias: learning trajectory\n'
             'Left: base pre-training checkpoints   |   Right: instruction fine-tuning',
-            fontsize=11, fontweight='bold')
+            fontsize=FS_SUPTITLE, fontweight='bold')
 
         panel_specs = [
             (ax_gap, gaps,
@@ -456,21 +443,21 @@ def save_bias_trajectory(base_stats, instruct_stats, out_dir):
                 if ls:
                     ax.annotate('⚠', (xs[xi], vals[xi]),
                                 textcoords='offset points', xytext=(0, 6),
-                                ha='center', fontsize=9, color='#B71C1C')
+                                ha='center', fontsize=FS_LABEL, color=LOW_SIG_COLOR)
 
             ax.set_xticks(xs)
-            ax.set_xticklabels(labels, rotation=40, ha='right', fontsize=8)
-            ax.set_ylabel(ylabel, fontsize=9)
-            ax.set_title(title, fontsize=9)
-            ax.legend(fontsize=9)
+            ax.set_xticklabels(labels, rotation=40, ha='right', fontsize=FS_TICK)
+            ax.set_ylabel(ylabel, fontsize=FS_LABEL)
+            ax.set_title(title, fontsize=FS_TITLE)
+            ax.legend(fontsize=FS_LEGEND)
             ax.grid(axis='y', alpha=0.25)
             ax.axhline(0, color='black', linewidth=0.7, alpha=0.3)
 
         path = os.path.join(out_dir, f'{domain}-bias-trajectory.pdf')
-        _savefig(fig, path)
+        _savepdf(fig, path)
 
 
 print('\n=== Bias trajectory: effect gap + raw L0 signal ===')
-save_bias_trajectory(base_stats, instruct_stats, PLOTS_BASE)
+save_bias_trajectory(base_stats, instruct_stats, COMPARE_DIR)
 
 print('\nDone.')

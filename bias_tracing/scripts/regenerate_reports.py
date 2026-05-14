@@ -7,13 +7,16 @@ Usage:
     python scripts/regenerate_reports.py
 """
 
+import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import json
 import datetime
 
-PLOTS_BASE = '/deepfreeze/aag026/Aaryan2/BiasEdit/bias_tracing/plots'
-BIAS_TYPES = ['gender', 'profession', 'race', 'religion']
-LOW_SIGNAL_THRESHOLD = 0.03
+from plot_utils import PLOTS_BASE, BIAS_TYPES, LOW_SIGNAL
+
+LOW_SIGNAL_THRESHOLD = LOW_SIGNAL
 
 
 def nie(v, low, gap):

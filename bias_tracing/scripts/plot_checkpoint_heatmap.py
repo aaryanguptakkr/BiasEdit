@@ -13,7 +13,10 @@ Reads .npz case files directly from the shared zip, falling back to local
 filesystem for checkpoints that are already extracted.
 """
 
+import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import io
 import zipfile
 import numpy as np
@@ -21,51 +24,14 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-ZIP_PATH   = '/deepfreeze/share/xuxin_transfer/bias_tracing/results.zip'
-LOCAL_BASE = '/deepfreeze/aag026/Aaryan2/BiasEdit/bias_tracing/results'   # raw .npz data
-PLOTS_BASE = '/deepfreeze/aag026/Aaryan2/BiasEdit/bias_tracing/plots'     # summary figures
+from plot_utils import (
+    ZIP_PATH, LOCAL_BASE, PLOTS_BASE, MODEL_CONFIGS, BIAS_TYPES,
+    FS_SUPTITLE, FS_TITLE, FS_LABEL, FS_TICK,
+)
 
-DOMAINS    = ['gender', 'profession', 'race', 'religion']
+DOMAINS    = BIAS_TYPES
 KINDS      = ['mlp', 'attn']
 NUM_LAYERS = 16
-
-# ── model catalogue ───────────────────────────────────────────────────────────
-# Each entry: (checkpoint_dir_name, x-axis label)
-
-MODEL_CONFIGS = {
-    'OLMo-2-0425-1B': {
-        'org': 'allenai',
-        'checkpoints': [
-            ('stage1-step0-tokens0B',               '0 B'),
-            ('stage1-step10000-tokens21B',           '21 B'),
-            ('stage1-step150000-tokens315B',         '315 B'),
-            ('stage1-step1140000-tokens2391B',       '2.4 T'),
-            ('stage1-step1907359-tokens4001B',       '4 T'),
-            ('stage2-ingredient3-step1000-tokens3B',   's2\n3 B'),
-            ('stage2-ingredient3-step11000-tokens24B',  's2\n24 B'),
-            ('stage2-ingredient3-step23852-tokens51B',  's2\n51 B'),
-        ],
-    },
-    'OLMo-2-0425-1B-Instruct': {
-        'org': 'allenai',
-        'checkpoints': [
-            ('step_200',  '200'),
-            ('step_1400', '1400'),
-            ('step_2600', '2600'),
-        ],
-    },
-    'pythia-1b': {
-        'org': 'EleutherAI',
-        'checkpoints': [
-            ('step0',    '0'),
-            ('step1000', '1k'),
-            ('step5000', '5k'),
-            ('step81000',  '81k'),
-            ('step137000', '137k'),
-            ('step143000', '143k'),
-        ],
-    },
-}
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -179,7 +145,7 @@ for model_name, cfg in MODEL_CONFIGS.items():
     fig.suptitle(
         f'{model_name}  |  Causal Tracing — Mean Indirect Effect\n'
         'X: Training Checkpoint   Y: Layer   Colour: peak-window mean score',
-        fontsize=12, fontweight='bold',
+        fontsize=FS_SUPTITLE, fontweight='bold',
     )
 
     CMAP = 'hot'
@@ -197,20 +163,20 @@ for model_name, cfg in MODEL_CONFIGS.items():
             )
 
             ax.set_xticks(range(n_steps))
-            ax.set_xticklabels(step_labels, rotation=45, ha='right', fontsize=8)
+            ax.set_xticklabels(step_labels, rotation=45, ha='right', fontsize=FS_TICK)
             ax.set_yticks(range(0, NUM_LAYERS, 2))
-            ax.set_yticklabels(range(0, NUM_LAYERS, 2), fontsize=8)
+            ax.set_yticklabels(range(0, NUM_LAYERS, 2), fontsize=FS_TICK)
 
             if ki == 0:
-                ax.set_title(domain.capitalize(), fontsize=11,
+                ax.set_title(domain.capitalize(), fontsize=FS_TITLE,
                              fontweight='bold', pad=6)
             if di == 0:
-                ax.set_ylabel(f'{kind.upper()}\nLayer', fontsize=10)
+                ax.set_ylabel(f'{kind.upper()}\nLayer', fontsize=FS_LABEL)
             if ki == len(KINDS) - 1:
-                ax.set_xlabel('Checkpoint', fontsize=8)
+                ax.set_xlabel('Checkpoint', fontsize=FS_LABEL)
 
             cb = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-            cb.ax.tick_params(labelsize=7)
+            cb.ax.tick_params(labelsize=FS_TICK)
 
     out_path = os.path.join(PLOTS_BASE, model_name, 'heatmap_checkpoint_layer.pdf')
     os.makedirs(os.path.dirname(out_path), exist_ok=True)

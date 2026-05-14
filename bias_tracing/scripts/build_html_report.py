@@ -9,21 +9,21 @@ Output:
     bias_tracing/ANALYSIS_REPORT.html
 """
 
-import os, json, base64, io
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import json, base64, io
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 
-PLOTS_BASE = '/deepfreeze/aag026/Aaryan2/BiasEdit/bias_tracing/plots'
-OUT_HTML   = '/deepfreeze/aag026/Aaryan2/BiasEdit/bias_tracing/ANALYSIS_REPORT.html'
+from plot_utils import PLOTS_BASE, BASE_MODEL, INST_MODEL, PYTHIA, BIAS_TYPES, LOW_SIGNAL
 
-BASE_MODEL  = 'OLMo-2-0425-1B'
-INST_MODEL  = 'OLMo-2-0425-1B-Instruct'
-PYTHIA      = 'pythia-1b'
-DOMAINS     = ['gender', 'profession', 'race', 'religion']
-LOW_SIGNAL  = 0.03
+OUT_HTML = '/deepfreeze/aag026/Aaryan2/BiasEdit/bias_tracing/ANALYSIS_REPORT.html'
+DOMAINS  = BIAS_TYPES
 
 PANELS = [
     ('states_nie', 'States (full restore)'),
