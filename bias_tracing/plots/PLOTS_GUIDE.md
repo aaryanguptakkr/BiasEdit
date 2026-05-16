@@ -219,7 +219,11 @@ plots/
     │   └── composite-all.pdf
     ├── post_to_pre/                       Source: OLMo Instruct  →  Target: OLMo base (same layout)
     ├── {domain}-directions-states.pdf     pre→post vs post→pre side-by-side, fixed Y-axis
-    └── {domain}-directions-words.pdf
+    ├── {domain}-directions-words.pdf
+    ├── 4panel-{domain}-states.pdf         4-panel comparison: within-model + cross-patch (states)
+    ├── 4panel-{domain}-words.pdf          4-panel comparison: within-model + cross-patch (words)
+    ├── 4panel-composite-states.pdf        All 4 domains, rows=domain cols=4 panels (states)
+    └── 4panel-composite-words.pdf         All 4 domains, rows=domain cols=4 panels (words)
 ```
 
 ---
@@ -291,3 +295,25 @@ Per-direction files mirror the within-model per-checkpoint layout (`{domain}-sta
 
 **`{domain}-directions-states.pdf` / `{domain}-directions-words.pdf`**
 Side-by-side comparison of both directions. Y-axis fixed across directions for direct comparison.
+
+**`4panel-{domain}-states.pdf` / `4panel-{domain}-words.pdf`**
+*How does bias localization in each model compare to what transfers across models?*
+4 panels with a shared Y-axis:
+
+| Panel | Content |
+|---|---|
+| 1 | OLMo Stage 2 last checkpoint (`s2-51B`) — within-model causal tracing |
+| 2 | OLMo Instruct last checkpoint (`step2600`) — within-model causal tracing |
+| 3 | Pre → Post cross-patch |
+| 4 | Post → Pre cross-patch |
+
+Panels 1–2 show how bias is stored in each model on its own; panels 3–4 show how much of that
+encoding transfers when activations are injected across models. Placing them on the same Y-axis
+makes the comparison direct. Methodology follows arXiv:2504.02904.
+
+> **Checkpoint caveat:** The cross-patch runs used the HuggingFace main branch of each model.
+> For instruct this equals `step2600`; for base it may not exactly match `s2-51B`. To be confirmed.
+
+**`4panel-composite-states.pdf` / `4panel-composite-words.pdf`**
+Same 4-panel layout for all 4 bias domains in one figure (rows = domains, columns = panels).
+Y-axis is fixed per row (per domain) so domains are not conflated.

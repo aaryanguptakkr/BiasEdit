@@ -144,6 +144,7 @@ WORDS_LABELS = [
 BAR_COLORS = ['#1f77b4', '#d62728', '#2ca02c']
 
 Y_LABEL_BARS = 'Abs. log prob diff (stereo − anti)'
+Y_LABEL_NIE  = 'NIE (normalized indirect effect)'
 
 # ── data path helpers ─────────────────────────────────────────────────────────
 

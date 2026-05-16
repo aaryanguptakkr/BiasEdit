@@ -182,8 +182,26 @@ plots/
     │   └── composite-all.pdf
     ├── post_to_pre/                            source: OLMo Instruct  →  target: OLMo base (same layout)
     ├── <domain>-directions-states.pdf          ← pre→post vs post→pre side-by-side, fixed Y-axis
-    └── <domain>-directions-words.pdf
+    ├── <domain>-directions-words.pdf
+    ├── 4panel-<domain>-states.pdf              ← 4-panel comparison (see below)
+    ├── 4panel-<domain>-words.pdf
+    ├── 4panel-composite-states.pdf             ← all 4 domains, rows=domain cols=4 panels
+    └── 4panel-composite-words.pdf
 ```
+
+**4-panel plots** (`4panel-<domain>-{states,words}.pdf`):
+Each figure places four bar charts side-by-side with a shared Y-axis:
+
+| Panel | Content | Data source |
+|---|---|---|
+| 1 | OLMo Stage 2 last ckpt (`s2-51B`) | within-model causal tracing (zip) |
+| 2 | OLMo Instruct last ckpt (`step2600`) | within-model causal tracing (zip) |
+| 3 | Pre → Post cross-patch | local NFS cross-patch results |
+| 4 | Post → Pre cross-patch | local NFS cross-patch results |
+
+> **Checkpoint caveat:** Panels 3–4 use the HuggingFace main branch of each model, which for
+> the instruct model equals `step2600`, but for the base model may not exactly match `s2-51B`.
+> To be confirmed.
 
 **Full regeneration (three independent steps):**
 
@@ -253,8 +271,18 @@ python fig.py --plots cross_patch --bias gender          # one domain only
   PDFs and composites in `plots/cross_patch/{direction}/`, mirroring the per-checkpoint layout.
 - `save_cross_patch_comparison(all_direction_results, domains, out_dir)` — puts both directions
   side-by-side with a fixed Y-axis in `plots/cross_patch/`.
+- `load_within_model_from_zip(zf, zip_names_all, model_name, org, checkpoint, domain)` — loads
+  within-model causal tracing results from the zip for a specific checkpoint, returning a result
+  dict in the same format as `load_cross_patch_domain`. Used to pull the last checkpoints for
+  the 4-panel plots without re-running the full within-model pipeline.
+- `save_cross_patch_4panel(within_model_panels, all_direction_results, domains, out_dir)` —
+  generates the 4-panel comparison figures (per domain + composite) in `plots/cross_patch/`.
 
-All three functions are gated by `RUN_CROSS_PATCH` and controlled via `--plots cross_patch`.
+All functions are gated by `RUN_CROSS_PATCH` and controlled via `--plots cross_patch`.
+
+> **Bug fixed:** `zf.close()` was previously called immediately after the within-model model
+> loop (before the cross-patch block), causing the zip to be unavailable when `load_within_model_from_zip`
+> tried to read it. It is now called at the very end of the script after all blocks complete.
 
 **Adding a new cross-patch direction:**
 1. Add an entry to `CROSS_PATCH_CONFIGS` in `plot_utils.py` (specify `dir`, `label`, `desc`).

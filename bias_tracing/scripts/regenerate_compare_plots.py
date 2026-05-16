@@ -27,7 +27,7 @@ import matplotlib.cm as cm
 
 from plot_utils import (
     PLOTS_BASE, BASE_MODEL, INST_MODEL, PYTHIA,
-    BIAS_TYPES, LOW_SIGNAL, BAR_COLORS, Y_LABEL_BARS, STATES_LABELS,
+    BIAS_TYPES, LOW_SIGNAL, BAR_COLORS, Y_LABEL_BARS, Y_LABEL_NIE, STATES_LABELS,
     FS_SUPTITLE, FS_TITLE, FS_LABEL, FS_TICK, FS_LEGEND, FS_ANNOT,
     FIG_GRID_W_PER_COL, FIG_ROW_H, FIG_LINE_W_PER_PAN, FIG_TRAJ_H,
     BASE_COLOR, INSTRUCT_COLOR, LOW_SIG_COLOR, LOW_SIG_BG,
@@ -41,6 +41,16 @@ PANELS = [
 ]
 
 # ── helpers ───────────────────────────────────────────────────────────────────
+
+def _to_nie(s, key):
+    """Return NIE-normalized layer array for stats entry s and data key.
+    NIE = (val - mean_low) / effect_gap. Returns None when effect_gap <= 0."""
+    gap = s['effect_gap']
+    if gap <= 0:
+        return None
+    low = s['mean_low']
+    return np.array([(v - low) / gap for v in s[key]])
+
 
 def _load(model):
     p = os.path.join(PLOTS_BASE, model, 'stats.json')
@@ -463,7 +473,7 @@ save_bias_trajectory(base_stats, instruct_stats, COMPARE_DIR)
 
 # ── All three models in one figure ────────────────────────────────────────────
 
-def save_all_models_lines(base_stats, instruct_stats, pythia_stats, out_dir):
+def save_all_models_lines(base_stats, instruct_stats, pythia_stats, out_dir, use_nie=False):
     """
     One PDF per domain. 3 panels (States / Attn-only / MLP-only).
     All three model families on the same axes for direct cross-model comparison:
@@ -472,7 +482,8 @@ def save_all_models_lines(base_stats, instruct_stats, pythia_stats, out_dir):
       Pythia         — dotted green lines
 
     Y-axis shared across panels. One line per checkpoint per model family.
-    Output: {domain}-all-models.pdf
+    use_nie=True: Y = NIE (normalized); use_nie=False: Y = raw abs log prob diff.
+    Output: {domain}-all-models[-nie].pdf
     """
     n_base     = len(base_stats)
     n_instruct = len(instruct_stats)
@@ -483,6 +494,11 @@ def save_all_models_lines(base_stats, instruct_stats, pythia_stats, out_dir):
     pythia_colors   = [cm.Greens(0.35  + 0.55 * i / max(n_pythia   - 1, 1)) for i in range(n_pythia)]
 
     LEGEND_TITLE = '[B] OLMo Base  ·  [I] OLMo Instruct  ·  [P] Pythia  |  dashed/dotted = low-signal'
+    y_label      = Y_LABEL_NIE if use_nie else Y_LABEL_BARS
+    fname_suffix = '-nie' if use_nie else ''
+
+    def _get(s, key):
+        return _to_nie(s, key) if use_nie else np.array(s[key])
 
     for domain in BIAS_TYPES:
         # extra height reserves space for the bottom legend without squishing plots
@@ -490,7 +506,7 @@ def save_all_models_lines(base_stats, instruct_stats, pythia_stats, out_dir):
         fig.suptitle(
             f'All models — {domain.capitalize()} bias: layer profile comparison\n'
             'OLMo base (solid blue) · OLMo Instruct (dashed orange) · Pythia (dotted green). '
-            'Y-axis shared.',
+            f'Y = {"NIE" if use_nie else "abs log prob diff"}, shared across panels.',
             fontsize=FS_SUPTITLE, fontweight='bold')
 
         # collect shared y-range across all models and panels
@@ -499,7 +515,9 @@ def save_all_models_lines(base_stats, instruct_stats, pythia_stats, out_dir):
             for e in base_stats + instruct_stats + pythia_stats:
                 s = e['domains'].get(domain)
                 if s:
-                    all_vals.extend(s[key])
+                    v = _get(s, key)
+                    if v is not None:
+                        all_vals.extend(v)
         if not all_vals:
             plt.close(fig)
             continue
@@ -512,34 +530,43 @@ def save_all_models_lines(base_stats, instruct_stats, pythia_stats, out_dir):
                 s = e['domains'].get(domain)
                 if not s:
                     continue
+                vals = _get(s, key)
+                if vals is None:
+                    continue
                 ls = '--' if s['effect_gap'] < LOW_SIGNAL else '-'
-                ax.plot(np.array(s[key]), color=base_colors[i], linewidth=1.8,
+                ax.plot(vals, color=base_colors[i], linewidth=1.8,
                         linestyle=ls, label=f'[B] {e["label"]}')
-                ax.plot(0, s[key][0], 'o', color=base_colors[i], markersize=5)
+                ax.plot(0, vals[0], 'o', color=base_colors[i], markersize=5)
 
             # OLMo Instruct — dashed
             for i, e in enumerate(instruct_stats):
                 s = e['domains'].get(domain)
                 if not s:
                     continue
+                vals = _get(s, key)
+                if vals is None:
+                    continue
                 ls = ':' if s['effect_gap'] < LOW_SIGNAL else '--'
-                ax.plot(np.array(s[key]), color=instruct_colors[i], linewidth=2.0,
+                ax.plot(vals, color=instruct_colors[i], linewidth=2.0,
                         linestyle=ls, label=f'[I] {e["label"]}')
-                ax.plot(0, s[key][0], 's', color=instruct_colors[i], markersize=5)
+                ax.plot(0, vals[0], 's', color=instruct_colors[i], markersize=5)
 
             # Pythia — dotted
             for i, e in enumerate(pythia_stats):
                 s = e['domains'].get(domain)
                 if not s:
                     continue
+                vals = _get(s, key)
+                if vals is None:
+                    continue
                 ls = (0, (1, 1)) if s['effect_gap'] < LOW_SIGNAL else (0, (3, 1, 1, 1))
-                ax.plot(np.array(s[key]), color=pythia_colors[i], linewidth=1.8,
+                ax.plot(vals, color=pythia_colors[i], linewidth=1.8,
                         linestyle=ls, label=f'[P] {e["label"]}')
-                ax.plot(0, s[key][0], '^', color=pythia_colors[i], markersize=5)
+                ax.plot(0, vals[0], '^', color=pythia_colors[i], markersize=5)
 
             ax.set_title(panel_title, fontsize=FS_TITLE)
             ax.set_xlabel('Layer', fontsize=FS_LABEL)
-            ax.set_ylabel(Y_LABEL_BARS, fontsize=FS_LABEL)
+            ax.set_ylabel(y_label, fontsize=FS_LABEL)
             ax.set_ylim(y_min, y_max)
             ax.axhline(0, color='black', linewidth=0.6, alpha=0.3)
             ax.grid(alpha=0.2)
@@ -551,22 +578,27 @@ def save_all_models_lines(base_stats, instruct_stats, pythia_stats, out_dir):
                    title_fontsize=FS_LEGEND, frameon=True)
         fig.tight_layout(rect=[0, 0.20, 1, 0.96])
 
-        _savepdf(fig, os.path.join(out_dir, f'{domain}-all-models.pdf'))
+        _savepdf(fig, os.path.join(out_dir, f'{domain}-all-models{fname_suffix}.pdf'))
 
 
 print('\n=== All three models: combined line plots ===')
 save_all_models_lines(base_stats, instruct_stats, pythia_stats, COMPARE_DIR)
 
+print('\n=== All three models: combined line plots (NIE) ===')
+save_all_models_lines(base_stats, instruct_stats, pythia_stats, COMPARE_DIR, use_nie=True)
+
 
 # ── Sentence-pair-weighted domain average × all models ────────────────────────
 
-def _domain_weighted_avg(ckpt_stats, key):
+def _domain_weighted_avg(ckpt_stats, key, use_nie=False):
     """
     For each checkpoint, compute a sentence-pair-weighted mean of `key`
-    (e.g. 'states_nie') across all available domains:
+    across all available domains:
 
         weighted_score[layer] = Σ(n_cases[d] * scores[d][layer]) / Σ n_cases[d]
 
+    use_nie=True: scores are NIE-normalized before weighting; domains where
+    effect_gap <= 0 are skipped entirely.
     Returns list of (label, weighted_scores, low_sig) where low_sig is True
     if any contributing domain has effect_gap < LOW_SIGNAL.
     """
@@ -579,8 +611,13 @@ def _domain_weighted_avg(ckpt_stats, key):
             s = e['domains'].get(domain)
             if not s:
                 continue
-            n      = s['n_cases']
-            scores = np.array(s[key])
+            n = s['n_cases']
+            if use_nie:
+                scores = _to_nie(s, key)
+                if scores is None:
+                    continue
+            else:
+                scores = np.array(s[key])
             weighted = scores * n if weighted is None else weighted + scores * n
             total_n += n
             if s['effect_gap'] < LOW_SIGNAL:
@@ -590,14 +627,15 @@ def _domain_weighted_avg(ckpt_stats, key):
     return out
 
 
-def save_domain_weighted_all_models(base_stats, instruct_stats, pythia_stats, out_dir):
+def save_domain_weighted_all_models(base_stats, instruct_stats, pythia_stats, out_dir, use_nie=False):
     """
     Single figure, 3 panels (States / Attn-only / MLP-only).
-    Each line = one training checkpoint; Y = sentence-pair-weighted mean abs log
-    prob diff across all 4 bias domains (weight = n_cases per domain per checkpoint).
+    Each line = one training checkpoint; Y = sentence-pair-weighted mean across
+    all 4 bias domains (weight = n_cases per domain per checkpoint).
+    use_nie=True: Y = NIE (normalized); use_nie=False: Y = raw abs log prob diff.
     OLMo base (solid blue) · OLMo Instruct (dashed orange) · Pythia (dotted green).
     Y-axis shared across panels. Legend below the figure.
-    Output: domain-weighted-avg-all-models.pdf
+    Output: domain-weighted-avg-all-models[-nie].pdf
     """
     n_base     = len(base_stats)
     n_instruct = len(instruct_stats)
@@ -609,32 +647,34 @@ def save_domain_weighted_all_models(base_stats, instruct_stats, pythia_stats, ou
 
     LEGEND_TITLE = ('[B] OLMo Base  ·  [I] OLMo Instruct  ·  [P] Pythia  |  '
                     'dashed/dotted = low-signal in ≥1 domain')
+    y_label      = Y_LABEL_NIE if use_nie else Y_LABEL_BARS
+    fname_suffix = '-nie' if use_nie else ''
 
     fig, axes = plt.subplots(1, 3, figsize=(FIG_LINE_W_PER_PAN * 3, FIG_ROW_H + 1.2))
     fig.suptitle(
         'All models — Sentence-pair-weighted domain average: layer profile comparison\n'
-        'Y = weighted mean abs log prob diff (weight = n_cases per domain). '
+        f'Y = weighted mean {"NIE" if use_nie else "abs log prob diff"} (weight = n_cases per domain). '
         'OLMo base (solid) · OLMo Instruct (dashed) · Pythia (dotted).',
         fontsize=FS_SUPTITLE, fontweight='bold')
 
     for ax, (key, panel_title) in zip(axes, PANELS):
         all_vals = []
 
-        for i, (lbl, scores, low_sig) in enumerate(_domain_weighted_avg(base_stats, key)):
+        for i, (lbl, scores, low_sig) in enumerate(_domain_weighted_avg(base_stats, key, use_nie)):
             ls = '--' if low_sig else '-'
             ax.plot(scores, color=base_colors[i], linewidth=1.8, linestyle=ls,
                     label=f'[B] {lbl}')
             ax.plot(0, scores[0], 'o', color=base_colors[i], markersize=5)
             all_vals.extend(scores)
 
-        for i, (lbl, scores, low_sig) in enumerate(_domain_weighted_avg(instruct_stats, key)):
+        for i, (lbl, scores, low_sig) in enumerate(_domain_weighted_avg(instruct_stats, key, use_nie)):
             ls = ':' if low_sig else '--'
             ax.plot(scores, color=instruct_colors[i], linewidth=2.0, linestyle=ls,
                     label=f'[I] {lbl}')
             ax.plot(0, scores[0], 's', color=instruct_colors[i], markersize=5)
             all_vals.extend(scores)
 
-        for i, (lbl, scores, low_sig) in enumerate(_domain_weighted_avg(pythia_stats, key)):
+        for i, (lbl, scores, low_sig) in enumerate(_domain_weighted_avg(pythia_stats, key, use_nie)):
             ls = (0, (1, 1)) if low_sig else (0, (3, 1, 1, 1))
             ax.plot(scores, color=pythia_colors[i], linewidth=1.8, linestyle=ls,
                     label=f'[P] {lbl}')
@@ -645,7 +685,7 @@ def save_domain_weighted_all_models(base_stats, instruct_stats, pythia_stats, ou
         ax.set_ylim(min(all_vals) - margin, max(all_vals) + margin)
         ax.set_title(panel_title, fontsize=FS_TITLE)
         ax.set_xlabel('Layer', fontsize=FS_LABEL)
-        ax.set_ylabel(Y_LABEL_BARS, fontsize=FS_LABEL)
+        ax.set_ylabel(y_label, fontsize=FS_LABEL)
         ax.axhline(0, color='black', linewidth=0.6, alpha=0.3)
         ax.grid(alpha=0.2)
 
@@ -654,22 +694,25 @@ def save_domain_weighted_all_models(base_stats, instruct_stats, pythia_stats, ou
                fontsize=FS_LEGEND, ncol=6, title=LEGEND_TITLE,
                title_fontsize=FS_LEGEND, frameon=True)
     fig.tight_layout(rect=[0, 0.20, 1, 0.96])
-    _savepdf(fig, os.path.join(out_dir, 'domain-weighted-avg-all-models.pdf'))
+    _savepdf(fig, os.path.join(out_dir, f'domain-weighted-avg-all-models{fname_suffix}.pdf'))
 
 
 print('\n=== Sentence-pair-weighted domain average × all models ===')
 save_domain_weighted_all_models(base_stats, instruct_stats, pythia_stats, COMPARE_DIR)
 
+print('\n=== Sentence-pair-weighted domain average × all models (NIE) ===')
+save_domain_weighted_all_models(base_stats, instruct_stats, pythia_stats, COMPARE_DIR, use_nie=True)
+
 
 # ── All domains × all models in one figure ────────────────────────────────────
 
-def save_all_domains_all_models(base_stats, instruct_stats, pythia_stats, out_dir):
+def save_all_domains_all_models(base_stats, instruct_stats, pythia_stats, out_dir, use_nie=False):
     """
     Single PDF: 4 rows (domains) × 3 columns (States / Attn-only / MLP-only).
     All three model families on shared axes in every cell.
-    Y-axis is fixed per column so domains can be compared vertically within each
-    restore condition.
-    Output: all-domains-all-models.pdf
+    Y-axis is fixed globally across all panels.
+    use_nie=True: Y = NIE (normalized); use_nie=False: Y = raw abs log prob diff.
+    Output: all-domains-all-models[-nie].pdf
     """
     n_base     = len(base_stats)
     n_instruct = len(instruct_stats)
@@ -679,6 +722,12 @@ def save_all_domains_all_models(base_stats, instruct_stats, pythia_stats, out_di
     instruct_colors = [cm.Oranges(0.45 + 0.45 * i / max(n_instruct - 1, 1)) for i in range(n_instruct)]
     pythia_colors   = [cm.Greens(0.35  + 0.55 * i / max(n_pythia   - 1, 1)) for i in range(n_pythia)]
 
+    y_label      = Y_LABEL_NIE if use_nie else Y_LABEL_BARS
+    fname_suffix = '-nie' if use_nie else ''
+
+    def _get(s, key):
+        return _to_nie(s, key) if use_nie else np.array(s[key])
+
     n_domains = len(BIAS_TYPES)
     # extra height at bottom reserves space for the figure-level legend
     fig, axes = plt.subplots(n_domains, 3,
@@ -686,7 +735,7 @@ def save_all_domains_all_models(base_stats, instruct_stats, pythia_stats, out_di
     fig.suptitle(
         'All domains × All models — layer profile comparison\n'
         'OLMo base (solid blue) · OLMo Instruct (dashed orange) · Pythia (dotted green). '
-        'Y-axis fixed across all panels.',
+        f'Y = {"NIE" if use_nie else "abs log prob diff"}, fixed across all panels.',
         fontsize=FS_SUPTITLE, fontweight='bold')
 
     # single global y-limit across all domains and all restore conditions
@@ -696,7 +745,9 @@ def save_all_domains_all_models(base_stats, instruct_stats, pythia_stats, out_di
             for domain in BIAS_TYPES:
                 s = e['domains'].get(domain)
                 if s:
-                    all_vals.extend(s[key])
+                    v = _get(s, key)
+                    if v is not None:
+                        all_vals.extend(v)
     margin = (max(all_vals) - min(all_vals)) * 0.1 if all_vals else 0.05
     global_ylim = (min(all_vals) - margin, max(all_vals) + margin) if all_vals else (0, 1)
 
@@ -709,33 +760,39 @@ def save_all_domains_all_models(base_stats, instruct_stats, pythia_stats, out_di
                 s = e['domains'].get(domain)
                 if not s:
                     continue
+                vals = _get(s, key)
+                if vals is None:
+                    continue
                 ls  = '--' if s['effect_gap'] < LOW_SIGNAL else '-'
                 lbl = f'[B] {e["label"]}' if row == 0 else '_nolegend_'
-                ax.plot(np.array(s[key]), color=base_colors[i], linewidth=1.5,
-                        linestyle=ls, label=lbl)
-                ax.plot(0, s[key][0], 'o', color=base_colors[i], markersize=4)
+                ax.plot(vals, color=base_colors[i], linewidth=1.5, linestyle=ls, label=lbl)
+                ax.plot(0, vals[0], 'o', color=base_colors[i], markersize=4)
 
             # OLMo Instruct — dashed
             for i, e in enumerate(instruct_stats):
                 s = e['domains'].get(domain)
                 if not s:
                     continue
+                vals = _get(s, key)
+                if vals is None:
+                    continue
                 ls  = ':' if s['effect_gap'] < LOW_SIGNAL else '--'
                 lbl = f'[I] {e["label"]}' if row == 0 else '_nolegend_'
-                ax.plot(np.array(s[key]), color=instruct_colors[i], linewidth=1.8,
-                        linestyle=ls, label=lbl)
-                ax.plot(0, s[key][0], 's', color=instruct_colors[i], markersize=4)
+                ax.plot(vals, color=instruct_colors[i], linewidth=1.8, linestyle=ls, label=lbl)
+                ax.plot(0, vals[0], 's', color=instruct_colors[i], markersize=4)
 
             # Pythia — dash-dot
             for i, e in enumerate(pythia_stats):
                 s = e['domains'].get(domain)
                 if not s:
                     continue
+                vals = _get(s, key)
+                if vals is None:
+                    continue
                 ls  = (0, (1, 1)) if s['effect_gap'] < LOW_SIGNAL else (0, (3, 1, 1, 1))
                 lbl = f'[P] {e["label"]}' if row == 0 else '_nolegend_'
-                ax.plot(np.array(s[key]), color=pythia_colors[i], linewidth=1.5,
-                        linestyle=ls, label=lbl)
-                ax.plot(0, s[key][0], '^', color=pythia_colors[i], markersize=4)
+                ax.plot(vals, color=pythia_colors[i], linewidth=1.5, linestyle=ls, label=lbl)
+                ax.plot(0, vals[0], '^', color=pythia_colors[i], markersize=4)
 
             ax.set_ylim(*global_ylim)
             ax.axhline(0, color='black', linewidth=0.6, alpha=0.3)
@@ -746,7 +803,7 @@ def save_all_domains_all_models(base_stats, instruct_stats, pythia_stats, out_di
                 ax.set_title(panel_title, fontsize=FS_TITLE, fontweight='bold')
             # row labels (left column only)
             if col == 0:
-                ax.set_ylabel(f'{domain.capitalize()}\n{Y_LABEL_BARS}', fontsize=FS_LABEL)
+                ax.set_ylabel(f'{domain.capitalize()}\n{y_label}', fontsize=FS_LABEL)
             # x-axis label (bottom row only)
             if row == n_domains - 1:
                 ax.set_xlabel('Layer', fontsize=FS_LABEL)
@@ -759,10 +816,13 @@ def save_all_domains_all_models(base_stats, instruct_stats, pythia_stats, out_di
                title_fontsize=FS_LEGEND, frameon=True)
     fig.tight_layout(rect=[0, 0.06, 1, 0.97])
 
-    _savepdf(fig, os.path.join(out_dir, 'all-domains-all-models.pdf'))
+    _savepdf(fig, os.path.join(out_dir, f'all-domains-all-models{fname_suffix}.pdf'))
 
 
 print('\n=== All domains × all models: combined grid ===')
 save_all_domains_all_models(base_stats, instruct_stats, pythia_stats, COMPARE_DIR)
+
+print('\n=== All domains × all models: combined grid (NIE) ===')
+save_all_domains_all_models(base_stats, instruct_stats, pythia_stats, COMPARE_DIR, use_nie=True)
 
 print('\nDone.')

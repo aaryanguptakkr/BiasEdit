@@ -920,6 +920,179 @@ def save_cross_patch_comparison(all_direction_results, domains, out_dir):
             _savepdf(fig, os.path.join(out_dir, f'{domain}-directions-{plot_type}.pdf'))
 
 
+def load_within_model_from_zip(zf, zip_names_all, model_name, org, checkpoint, domain,
+                               num_sample=None):
+    """
+    Load within-model causal tracing results from the shared zip for one
+    (model, checkpoint, domain) triple.  Returns a result dict in the same
+    format as load_cross_patch_domain, or None on failure.
+    """
+    prefix    = zip_cases_prefix(org, model_name, checkpoint, domain)
+    all_names = [n for n in zip_names_all if n.startswith(prefix) and n.endswith('.npz')]
+    if not all_names:
+        print(f'    [4panel] No zip data for {prefix}; skipping.')
+        return None
+
+    basenames    = [os.path.basename(n) for n in all_names]
+    single_b, attn_b, mlp_b = partition_names(basenames)
+    name_map     = {os.path.basename(n): n for n in all_names}
+    single_items = [name_map[b] for b in single_b[:num_sample] if b in name_map]
+    attn_items   = [name_map[b] for b in attn_b[:num_sample]   if b in name_map]
+    mlp_items    = [name_map[b] for b in mlp_b[:num_sample]    if b in name_map]
+    loader       = lambda p: load_npz_zip(zf, p)
+
+    print(f'    single={len(single_items)}, attn={len(attn_items)}, mlp={len(mlp_items)}')
+    if not single_items:
+        return None
+
+    try:
+        num_layer = loader(single_items[0])['scores'].shape[-1]
+    except Exception as ex:
+        print(f'    [4panel] Cannot read sample: {ex}')
+        return None
+
+    bias_mean, pre_blank_mean, blank_mean, n_cases, mean_high, mean_low = \
+        collect_scores(single_items, loader)
+    attn_mean, _, _, _, _, _ = collect_scores(attn_items, loader)
+    mlp_mean,  _, _, _, _, _ = collect_scores(mlp_items,  loader)
+
+    if bias_mean is None:
+        return None
+
+    zero           = np.zeros(num_layer)
+    attn_mean      = attn_mean      if attn_mean      is not None else zero
+    mlp_mean       = mlp_mean       if mlp_mean       is not None else zero
+    pre_blank_mean = pre_blank_mean if pre_blank_mean is not None else zero
+    blank_mean     = blank_mean     if blank_mean     is not None else zero
+
+    effect_gap = mean_high - mean_low
+    return {
+        'bias_mean':      bias_mean,
+        'pre_blank_mean': pre_blank_mean,
+        'blank_mean':     blank_mean,
+        'attn_mean':      attn_mean,
+        'mlp_mean':       mlp_mean,
+        'n_cases':        n_cases,
+        'mean_high':      mean_high,
+        'mean_low':       mean_low,
+        'effect_gap':     effect_gap,
+        'low_sig':        effect_gap < LOW_SIGNAL,
+        'num_layer':      num_layer,
+    }
+
+
+def save_cross_patch_4panel(within_model_panels, all_direction_results, domains, out_dir):
+    """
+    4-panel comparison per domain (and composite over all domains):
+
+      Panel 1 — OLMo Stage 2 last checkpoint  (within-model causal tracing)
+      Panel 2 — OLMo Instruct last checkpoint  (within-model causal tracing)
+      Panel 3 — Pre → Post cross-patch
+      Panel 4 — Post → Pre cross-patch
+
+    Y-axis is fixed across all 4 panels so they are directly comparable.
+
+    within_model_panels  : {domain: {'s2_last': result_dict, 'inst_last': result_dict}}
+    all_direction_results: {direction_key: {domain: result_dict}}
+    domains              : ordered list of domains to include
+    out_dir              : plots/cross_patch/
+
+    Output files:
+      4panel-{domain}-states.pdf
+      4panel-{domain}-words.pdf
+      4panel-composite-states.pdf
+      4panel-composite-words.pdf
+    """
+    PANEL_DEFS = [
+        ('s2_last',    'OLMo Stage 2\n(s2-51B)',     'within'),
+        ('inst_last',  'OLMo Instruct\n(step2600)',   'within'),
+        ('pre_to_post', 'Pre → Post',                 'cross'),
+        ('post_to_pre', 'Post → Pre',                 'cross'),
+    ]
+
+    def _get_res(key, src, domain):
+        if src == 'within':
+            return within_model_panels.get(domain, {}).get(key)
+        return all_direction_results.get(key, {}).get(domain)
+
+    def _shared_ylim(panels_data, plot_type):
+        all_vals = []
+        for res in panels_data:
+            if res is None:
+                continue
+            if plot_type == 'states':
+                all_vals.extend([res['bias_mean'], res['mlp_mean'], res['attn_mean']])
+            else:
+                all_vals.extend([res['bias_mean'], res['pre_blank_mean'], res['blank_mean']])
+        if not all_vals:
+            return None, None
+        flat   = np.concatenate(all_vals)
+        margin = (np.nanmax(flat) - np.nanmin(flat)) * 0.12 or 0.05
+        return np.nanmin(flat) - margin, np.nanmax(flat) + margin
+
+    def _fill_ax(ax, res, plot_type, labels_list, title, y_min, y_max):
+        if res is None:
+            ax.set_visible(False)
+            return
+        if plot_type == 'states':
+            r1, r2, r3 = res['bias_mean'], res['mlp_mean'], res['attn_mean']
+        else:
+            r1, r2, r3 = res['bias_mean'], res['pre_blank_mean'], res['blank_mean']
+        _draw_bars(ax, r1, r2, r3, labels_list, BAR_COLORS, res['num_layer'],
+                   'Layer', Y_LABEL_BARS, title)
+        ax.set_ylim(y_min, y_max)
+        ax.axhline(0, color='black', linewidth=0.8, linestyle='--', zorder=0)
+        if res['low_sig']:
+            ax.set_facecolor(LOW_SIG_BG)
+            ax.text(0.98, 0.97, '⚠ low-signal', transform=ax.transAxes,
+                    fontsize=FS_ANNOT, ha='right', va='top', color=LOW_SIG_COLOR)
+
+    for plot_type in ('states', 'words'):
+        labels_list = STATES_LABELS if plot_type == 'states' else WORDS_LABELS
+
+        # ── per-domain figures ────────────────────────────────────────────────
+        for domain in domains:
+            panels_data = [_get_res(key, src, domain) for key, _, src in PANEL_DEFS]
+            y_min, y_max = _shared_ylim(panels_data, plot_type)
+            if y_min is None:
+                continue
+
+            fig, axes = plt.subplots(1, 4, figsize=(FIG_BAR_W_PER_COL * 4, FIG_ROW_H))
+            fig.suptitle(
+                f'{domain.capitalize()} bias — 4-panel cross-patch comparison ({plot_type})\n'
+                'Cols 1–2: within-model causal tracing  |  Cols 3–4: cross-model patching  '
+                '|  Y-axis fixed across panels',
+                fontsize=FS_SUPTITLE, fontweight='bold')
+            for ax, (key, label, src), res in zip(axes, PANEL_DEFS, panels_data):
+                _fill_ax(ax, res, plot_type, labels_list, label, y_min, y_max)
+            plt.tight_layout()
+            _savepdf(fig, os.path.join(out_dir, f'4panel-{domain}-{plot_type}.pdf'))
+
+        # ── composite: all domains, rows=domains cols=panels ─────────────────
+        n_domains = len(domains)
+        fig, axes = plt.subplots(n_domains, 4,
+                                 figsize=(FIG_BAR_W_PER_COL * 4, FIG_ROW_H * n_domains))
+        if n_domains == 1:
+            axes = axes[np.newaxis, :]
+        fig.suptitle(
+            f'Cross-patch 4-panel comparison — all domains ({plot_type})\n'
+            'Columns: Stage2-last | Instruct-last | Pre→Post | Post→Pre  '
+            '|  Y-axis fixed per row',
+            fontsize=FS_SUPTITLE, fontweight='bold')
+        for row, domain in enumerate(domains):
+            panels_data = [_get_res(key, src, domain) for key, _, src in PANEL_DEFS]
+            y_min, y_max = _shared_ylim(panels_data, plot_type)
+            if y_min is None:
+                for col in range(4):
+                    axes[row, col].set_visible(False)
+                continue
+            for col, ((key, label, src), res) in enumerate(zip(PANEL_DEFS, panels_data)):
+                row_label = f'{domain.capitalize()} — {label}'
+                _fill_ax(axes[row, col], res, plot_type, labels_list, row_label, y_min, y_max)
+        plt.tight_layout()
+        _savepdf(fig, os.path.join(out_dir, f'4panel-composite-{plot_type}.pdf'))
+
+
 # ── main loop ─────────────────────────────────────────────────────────────────
 
 print(f'Opening zip: {ZIP_PATH}')
@@ -1075,8 +1248,6 @@ for model_name in models_to_run:
     if RUN_DELTA and all_ckpt_stats:
         save_bias_delta(all_ckpt_stats, model_name, model_out_dir)
 
-zf.close()
-
 # ── base vs instruct (cross-model) ────────────────────────────────────────────
 BASE     = 'OLMo-2-0425-1B'
 INSTRUCT = 'OLMo-2-0425-1B-Instruct'
@@ -1128,4 +1299,22 @@ if RUN_CROSS_PATCH:
     elif len(all_direction_results) == 1:
         print('\n  Only one direction has data — skipping comparison plots.')
 
+    # 4-panel comparison: within-model last checkpoints + both cross-patch directions
+    if all_direction_results:
+        print('\n  Loading within-model last checkpoints for 4-panel plots...')
+        S2_CKPT   = 'stage2-ingredient3-step23852-tokens51B'
+        INST_CKPT = 'step_2600'
+        within_model_panels = {}
+        for domain in domains_to_run:
+            print(f'  {domain}')
+            s2_res   = load_within_model_from_zip(
+                zf, zip_names_all, BASE, 'allenai', S2_CKPT, domain, args.num_sample)
+            inst_res = load_within_model_from_zip(
+                zf, zip_names_all, INSTRUCT, 'allenai', INST_CKPT, domain, args.num_sample)
+            within_model_panels[domain] = {'s2_last': s2_res, 'inst_last': inst_res}
+        print('\n  Generating 4-panel plots...')
+        save_cross_patch_4panel(within_model_panels, all_direction_results,
+                                domains_to_run, cross_patch_out)
+
+zf.close()
 print('\nDone.')
