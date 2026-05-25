@@ -13,14 +13,17 @@ Part 1 — Within-model patching (main checkpoint base vs step2000 instruct)
 
 Part 2 — Cross-patch distributional distance
     For each direction (pre_to_post, post_to_pre) and each domain:
-      Compare the distribution of per-case Absolute Log Prob Diff values at each K
-      position between within-model patching (target model) and cross-patch.
+      Compare the distribution of token-level Absolute Log Prob Diff values at
+      each K position between within-model patching (target model) and
+      cross-patch. Tokens are pooled across all cases (micro granularity) so the
+      subject per-layer mean equals the plotted bias_mean bar in the 4-panel
+      states plot.
       K = {subject, target} × 16 layers = 32 positions.
       Two metrics:
         Wasserstein-1 (W1): mean shift between distributions (units = raw delta)
         JSD: Jensen-Shannon Divergence via histogram (bits, bounded [0,1])
-      Both computed per K position, then averaged over all 32 K positions.
-      Also reported separately for subject positions (16) and target positions (16).
+      Both computed per layer; reported separately for subject positions (16)
+      and target positions (16), plus the combined mean over all 32 positions.
 
 NIE  = (raw_patched_score - mean_low) / (mean_high - mean_low)
        Normalized to each model's own effect gap. Scale-invariant.
@@ -36,10 +39,15 @@ K columns:
   col 1 = pre-target is excluded from K (context position, not knowledge-storage)
 
 Note on Part 2 distributions:
+  Distributions are over pooled subject TOKENS (micro), not per-case means, so
+  their per-layer mean matches the plotted bias_mean bar.
   JSD is computed on Absolute Log Prob Diff (always >= 0), NOT on NIE (can be negative).
   Histogram uses 50 equal-width bins over the union range of both distributions.
   W1 is scale-dependent (same units as Absolute Log Prob Diff).
   JSD is scale-free (bits).
+  Caveat: subject tokens within one case are correlated, not i.i.d.; this mainly
+  makes the JSD histogram look slightly more confident than truly independent
+  samples would. Accepted in exchange for matching the plot's aggregation.
 """
 
 import sys
@@ -169,42 +177,47 @@ print('This means every single K position increased in absolute signal after pos
 
 # ── Part 2: Cross-patch distributional distance ───────────────────────────────
 
-def load_per_case_K(files, loader):
+def load_per_token_K(files, loader):
     """
-    Load per-case subject and target position Absolute Log Prob Diff scores.
-    Unlike load_K (which averages across cases), this returns the full N×16 arrays
-    so we can compare empirical distributions case-by-case.
+    Load token-level subject and target position Absolute Log Prob Diff scores.
+    Pools EVERY subject/target token row across ALL cases (micro granularity) —
+    the same aggregation collect_scores uses for the 4-panel plot bars. The
+    per-layer mean of the returned subject array therefore equals the plotted
+    bias_mean[l] (the blue "Effect of single state" bar) exactly. We keep the
+    full pooled token rows (not per-case means) so the W1/JSD distributions are
+    over the same observations the bars average.
+
+    Subject is the position we actually report (the states plot is subject-only);
+    target is still returned so callers retain the ability to compute it.
 
     Returns:
-      subj: (N, 16) — one row per case, subject token position scores
-      tgt:  (N, 16) — one row per case, target token position scores
+      subj: (T_subj, 16) — one row per subject token, pooled across all cases
+      tgt:  (T_tgt,  16) — one row per target  token, pooled across all cases
       mean_high, mean_low: float scalars
     Returns (None, None, 0, 0) if no data.
     """
-    subj_list, tgt_list, highs, lows = [], [], [], []
+    subj_rows_all, tgt_rows_all, highs, lows = [], [], [], []
     for path in files:
         try:
             d = loader(path)
             scores = d['scores']  # (n_tokens, 16)
-            # subject: mean across all subject token rows
+            # subject: keep every subject token row (no per-case mean)
             subj_rows = [scores[b:e] for b, e in d['corrupt_range_anti']]
             if not subj_rows:
                 continue
-            subj = np.mean(np.concatenate(subj_rows, axis=0), axis=0)  # (16,)
-            # target: mean across all target token rows
+            subj_rows_all.append(np.concatenate(subj_rows, axis=0))  # (n_subj_tok, 16)
+            # target: keep every target token row
             idx0 = int(d['blank_idxs_anti'][0])
             idx1 = int(d['blank_idxs_anti'][1]) if len(d['blank_idxs_anti']) > 1 else idx0 + 1
-            tgt = np.mean(scores[idx0:idx1], axis=0)  # (16,)
-            subj_list.append(subj)
-            tgt_list.append(tgt)
+            tgt_rows_all.append(scores[idx0:idx1])  # (n_tgt_tok, 16)
             highs.append(float(d['high_score']))
             lows.append(float(d['low_score']))
         except Exception:
             continue
-    if not subj_list:
+    if not subj_rows_all:
         return None, None, 0.0, 0.0
-    return (np.array(subj_list),   # (N, 16)
-            np.array(tgt_list),    # (N, 16)
+    return (np.concatenate(subj_rows_all, axis=0),   # (T_subj, 16)
+            np.concatenate(tgt_rows_all,  axis=0),   # (T_tgt, 16)
             float(np.mean(highs)),
             float(np.mean(lows)))
 
@@ -272,11 +285,13 @@ DIRECTIONS = {
 print()
 print('=' * 70)
 print('Part 2 — Cross-patch distributional distance')
+print('Token scores are pooled at token-level (micro). The subject per-layer')
+print('means match the 4-panel states plot bars (bias_mean) exactly.')
+print('Subject and target positions are reported separately, plus the combined')
+print('mean over all 32 positions (16 subject + 16 target layers).')
 print('Metric 1: Wasserstein-1 (W1) — mean shift between distributions')
 print('          units = Absolute Log Prob Diff (same scale as raw scores)')
 print('Metric 2: JSD — Jensen-Shannon Divergence via histogram (bits, [0,1])')
-print('Both averaged over all 32 K positions (16 layers × subject + target).')
-print('Also shown separately for subject positions (16) and target positions (16).')
 print('=' * 70)
 
 for dir_key, cfg in DIRECTIONS.items():
@@ -317,12 +332,37 @@ for dir_key, cfg in DIRECTIONS.items():
         c_files  = [os.path.join(c_dir, f) for f in c_single]
         c_loader = load_npz_local
 
-        w_subj, w_tgt, w_mh, w_ml = load_per_case_K(w_files, w_loader)
-        c_subj, c_tgt, c_mh, c_ml = load_per_case_K(c_files, c_loader)
+        w_subj, w_tgt, w_mh, w_ml = load_per_token_K(w_files, w_loader)
+        c_subj, c_tgt, c_mh, c_ml = load_per_token_K(c_files, c_loader)
 
         if w_subj is None or c_subj is None:
             print(f'  {domain}: no data')
             continue
+
+
+
+        if domain == 'gender':
+            print(f"\n=== {dir_key} : gender SUBJECT series (token-level mean) ===")
+            print("These per-layer means equal the plotted bias_mean bar exactly.")
+
+            print("\nWithin-model (comparison target) SUBJECT:")
+            for l in range(16):
+                print(f"L{l}: {w_subj[:, l].mean()}")
+
+            print("\nCross-patch SUBJECT:")
+            for l in range(16):
+                print(f"L{l}: {c_subj[:, l].mean()}")
+
+            print(f"\n=== {dir_key} : gender TARGET series (token-level mean) ===")
+
+            print("\nWithin-model (comparison target) TARGET:")
+            for l in range(16):
+                print(f"L{l}: {w_tgt[:, l].mean()}")
+
+            print("\nCross-patch TARGET:")
+            for l in range(16):
+                print(f"L{l}: {c_tgt[:, l].mean()}")
+
 
         w1_subj, w1_tgt, jsd_subj, jsd_tgt = k_distances(w_subj, w_tgt, c_subj, c_tgt)
 
@@ -349,16 +389,31 @@ for dir_key, cfg in DIRECTIONS.items():
     print(f'\n{hdr}')
     print('  ' + '-' * (len(hdr) - 2))
 
-    rows = [
-        ('w1_mean',       'W1 — mean over all 32 K positions'),
-        ('w1_subj_mean',  'W1 — subject positions only (16)'),
-        ('w1_tgt_mean',   'W1 — target positions only  (16)'),
-        ('jsd_mean',      'JSD — mean over all 32 K positions'),
-        ('jsd_subj_mean', 'JSD — subject positions only (16)'),
-        ('jsd_tgt_mean',  'JSD — target positions only  (16)'),
+    subj_rows = [
+        ('w1_subj_mean',  'W1 — subject positions (16 layers)'),
+        ('jsd_subj_mean', 'JSD — subject positions (16 layers)'),
+    ]
+    tgt_rows = [
+        ('w1_tgt_mean',   'W1 — target positions (16 layers)'),
+        ('jsd_tgt_mean',  'JSD — target positions (16 layers)'),
     ]
 
-    for key, label in rows:
+    print('  [Subject position]')
+    for key, label in subj_rows:
+        vals = [dir_results.get(d, {}).get(key, float('nan')) for d in DOMAINS]
+        print(f"  {label:<42} {vals[0]:>8.4f} {vals[1]:>12.4f} {vals[2]:>8.4f}")
+
+    print('\n  [Target position]')
+    for key, label in tgt_rows:
+        vals = [dir_results.get(d, {}).get(key, float('nan')) for d in DOMAINS]
+        print(f"  {label:<42} {vals[0]:>8.4f} {vals[1]:>12.4f} {vals[2]:>8.4f}")
+
+    comb_rows = [
+        ('w1_mean',  'W1 — all positions (32 layers: subject+target)'),
+        ('jsd_mean', 'JSD — all positions (32 layers: subject+target)'),
+    ]
+    print('\n  [Combined: subject + target]')
+    for key, label in comb_rows:
         vals = [dir_results.get(d, {}).get(key, float('nan')) for d in DOMAINS]
         print(f"  {label:<42} {vals[0]:>8.4f} {vals[1]:>12.4f} {vals[2]:>8.4f}")
 
@@ -388,6 +443,15 @@ for dir_key, cfg in DIRECTIONS.items():
         if domain not in dir_results:
             continue
         vals = dir_results[domain]['w1_tgt']
+        row  = f"  {domain:<12}" + ''.join(f'{v:6.4f}' for v in vals)
+        print(row)
+
+    print(f'\n  Per-layer JSD (target position):')
+    print(hdr2)
+    for domain in DOMAINS:
+        if domain not in dir_results:
+            continue
+        vals = dir_results[domain]['jsd_tgt']
         row  = f"  {domain:<12}" + ''.join(f'{v:6.4f}' for v in vals)
         print(row)
 

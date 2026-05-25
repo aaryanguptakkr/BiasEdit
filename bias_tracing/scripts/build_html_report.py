@@ -233,7 +233,7 @@ gc = ckpt_colors_greens(n_pythia)
 imgs = {}
 
 # 1. Example bar chart — explain the measurement
-imgs['bar_example'] = plot_single_bar(base_stats, 's2-51B', 'gender')
+imgs['bar_example'] = plot_single_bar(base_stats, 'main', 'gender')
 print('  bar_example done')
 
 # 2. OLMo base line plots (all 4 domains)
@@ -422,7 +422,7 @@ the prediction is almost made, and the restored state is inconsistent with every
 # ── Section 3: Graph guide ────────────────────────────────────────────────────
 
 bar_ex = img_tag(imgs['bar_example'], caption=
-    'Standard bar chart — OLMo final checkpoint (s2-51B), gender domain. '
+    'Standard bar chart — OLMo final checkpoint (main), gender domain. '
     'X = layer (0–15), Y = abs. log prob diff (stereo − anti). '
     'Blue = States (full restore), Red = Effect with Attn severed, Green = Effect with MLP severed.') if imgs['bar_example'] else ''
 
@@ -444,7 +444,7 @@ sec_graphs = f'''
 <h3>Graph type 2 — Line checkpoint plot (all checkpoints, one domain)</h3>
 {img_tag(imgs['olmo_base_line_gender'], caption=
     'OLMo-2-0425-1B, gender domain. Each line = one training checkpoint. '
-    'Light blue = early training (0B), dark blue = late training (s2-51B). '
+    'Light blue = early training (0B), dark blue = late training (main). '
     'The dot on each line marks Layer 0.')}
 <ul>
   <li><strong>X-axis:</strong> Layer (0–15). Same as the bar chart.</li>
@@ -463,7 +463,7 @@ sec_graphs = f'''
     'Profession domain. Blue solid = OLMo base checkpoints (light→dark = early→late). '
     'Orange dashed = Instruct fine-tuning checkpoints. Y-axis shared.')}
 <ul>
-  <li><strong>Blue solid lines:</strong> Base pre-training checkpoints (0B → s2-51B).</li>
+  <li><strong>Blue solid lines:</strong> Base pre-training checkpoints (0B → main).</li>
   <li><strong>Orange dashed lines:</strong> Instruct fine-tuning checkpoints (step200–step2600).</li>
   <li><strong>Y-axis shared</strong> between base and instruct — positions of dashed vs solid lines
       are directly comparable.</li>
@@ -523,7 +523,7 @@ Layer 0 — the token embedding — and declines monotonically toward the final 
 MLP-only nor Attn-only scores show any peak at any layer.</p>
 
 {f2_numbers if False else f1_numbers}
-<p style="font-size:0.85em;color:#555;margin-top:4px"><em>OLMo base, final checkpoint (s2-51B), States restore.</em></p>
+<p style="font-size:0.85em;color:#555;margin-top:4px"><em>OLMo base, final checkpoint (main), States restore.</em></p>
 
 {img_tag(imgs['olmo_base_line_gender'], caption='OLMo base — gender: layer profile across all checkpoints. '
     'All lines peak at L0 and decline. The shape does not change across training — only the level shifts up.')}

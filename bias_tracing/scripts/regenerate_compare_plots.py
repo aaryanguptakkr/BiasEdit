@@ -35,7 +35,7 @@ from plot_utils import (
     BASE_COLOR, INSTRUCT_COLOR, LOW_SIG_COLOR, LOW_SIG_BG,
     _draw_bars, _savepdf,
     collect_scores, load_npz_local, load_npz_zip, partition_names,
-    zip_cases_prefix, local_cases_dir, ZIP_PATH,
+    zip_cases_prefix, local_cases_dir, ZIP_PATH, MAIN_ZIP,
 )
 
 PANELS = [
@@ -104,15 +104,37 @@ def _zip():
     return _zip_handle
 
 
+_main_zip_handle = None
+
+def _main_zip():
+    global _main_zip_handle
+    if _main_zip_handle is None:
+        _main_zip_handle = zipfile.ZipFile(MAIN_ZIP)
+    return _main_zip_handle
+
+
 def _npz_domain_stats(model, org, checkpoint_dir, domain, source='zip'):
     """
     Load domain stats directly from NPZ files (all restore conditions).
     Returns a dict with the same keys as a stats.json domain entry,
     or None if no files are found.
-    source='zip'   — read from ZIP_PATH
-    source='local' — read from LOCAL_BASE filesystem
+    source='zip'      — read from ZIP_PATH
+    source='main_zip' — read the OLMo 'main' checkpoint from MAIN_ZIP
+                        (prefix main/{domain}/causal_trace/cases/)
+    source='local'    — read from LOCAL_BASE filesystem
     """
-    if source == 'zip':
+    if source == 'main_zip':
+        prefix = f'main/{domain}/causal_trace/cases/'
+        zf     = _main_zip()
+        names  = [n for n in zf.namelist() if n.startswith(prefix) and n.endswith('.npz')]
+        all_basenames = [os.path.basename(n) for n in names]
+        single, attn, mlp = partition_names(all_basenames)
+        single_set, attn_set, mlp_set = set(single), set(attn), set(mlp)
+        file_list        = [prefix + b for b in all_basenames if b in single_set]
+        file_list_attn   = [prefix + b for b in all_basenames if b in attn_set]
+        file_list_mlp    = [prefix + b for b in all_basenames if b in mlp_set]
+        loader = lambda p: load_npz_zip(zf, p)
+    elif source == 'zip':
         prefix = zip_cases_prefix(org, model, checkpoint_dir, domain)
         zf     = _zip()
         names  = [n for n in zf.namelist() if n.startswith(prefix) and n.endswith('.npz')]
@@ -958,7 +980,7 @@ save_all_domains_all_models(base_stats, instruct_stats, pythia_stats, COMPARE_DI
 
 def save_prepost_comparison(base_stats, instruct_stats, out_dir):
     """
-    Compare s2-51B (end of pretraining) vs step2000 (HuggingFace main branch).
+    Compare main (end of pretraining) vs step2000 (HuggingFace main branch).
 
     3 panels per domain — Y-axis shared across all 3 panels per row:
       Panel 1 — Abs. log prob diff : 6 grouped bars/layer, paired by condition
@@ -1150,7 +1172,7 @@ def save_prepost_comparison(base_stats, instruct_stats, out_dir):
         return fig
 
     SUPTITLE = (
-        'End of pretraining (s2-51B) vs post-training (step2000, HuggingFace main)\n'
+        'End of pretraining (main) vs post-training (step2000, HuggingFace main)\n'
         'Panel 1: Abs. log prob diff (bars)  |  Panel 2: Abs. log prob diff (lines)  |  Panel 3: NIE (independent y-axis)\n'
         'Solid = Base, hatched/dashed = Instruct. Panels 1 & 2 share y-axis.'
     )
@@ -1174,7 +1196,7 @@ save_prepost_comparison(base_stats, instruct_stats, COMPARE_DIR)
 def save_cross_patch_nie_comparison(base_stats, instruct_stats, out_dir):
     """
     4-line NIE plot per domain + composite:
-      Within-model Base  (blue)   — s2-51B within-model causal tracing
+      Within-model Base  (blue)   — main within-model causal tracing
       Within-model Inst  (green)  — step2600 within-model causal tracing
       Pre → Post         (red)    — base activations patched into instruct model
       Post → Pre         (orange) — instruct activations patched into base model
@@ -1186,7 +1208,7 @@ def save_cross_patch_nie_comparison(base_stats, instruct_stats, out_dir):
 
     LINE_COLORS = ['#1565C0', '#2E7D32', '#C62828', '#E65100']
     LINE_LABELS = [
-        'Within-model Base (s2-51B)',
+        'Within-model Base (main)',
         'Within-model Instruct (step2000)',
         'Pre → Post  (base acts. → instruct)',
         'Post → Pre  (instruct acts. → base)',
@@ -1318,7 +1340,7 @@ def _mark_K_cols(ax, n_layers):
 
 def save_nie_heatmap(base_stats, instruct_stats, out_dir):
     """
-    NIE heatmap: Base (s2-51B) | Instruct (step2000) | Difference (Inst − Base)
+    NIE heatmap: Base (main) | Instruct (step2000) | Difference (Inst − Base)
     X: token position category — [subject], [pre-target], [target]
     Y: layer 0–15, L0 at top (closest to input)
     Colormap: RdBu_r — red = positive NIE (causal signal), blue = negative.
@@ -1343,7 +1365,7 @@ def save_nie_heatmap(base_stats, instruct_stats, out_dir):
     def _draw_row(row_axes, domain):
         ax0, ax1, ax2 = row_axes
         sb = _npz_domain_stats('OLMo-2-0425-1B', 'allenai',
-                               'stage2-ingredient3-step23852-tokens51B', domain, 'zip')
+                               'main', domain, 'main_zip')
         si = _npz_domain_stats('OLMo-2-0425-1B-Instruct', 'allenai',
                                'step_2000', domain, 'local')
         mb = _mat(sb) if sb else None
@@ -1362,7 +1384,7 @@ def save_nie_heatmap(base_stats, instruct_stats, out_dir):
         im2 = ax2.imshow(md,                  vmin=-dlim, vmax=dlim, **kw)
 
         for ax, ttl in zip([ax0, ax1, ax2],
-                           ['Base (s2-51B)', 'Instruct (step2000)', 'Inst − Base']):
+                           ['Base (main)', 'Instruct (step2000)', 'Inst − Base']):
             ax.set_title(f'{domain.capitalize()} — {ttl}', fontsize=FS_TITLE)
             ax.set_xticks([0, 1, 2])
             ax.set_xticklabels(POS_LABELS, fontsize=FS_TICK, rotation=20, ha='right')
@@ -1394,7 +1416,7 @@ def save_nie_heatmap(base_stats, instruct_stats, out_dir):
     nr = len(active)
     fig, axes = plt.subplots(nr, 3, figsize=(12, 5 * nr), constrained_layout=True)
     fig.suptitle(
-        'NIE heatmap — all domains  |  Base (s2-51B) vs Instruct (step2000)\n'
+        'NIE heatmap — all domains  |  Base (main) vs Instruct (step2000)\n'
         'Red = positive NIE. Base/Instruct clamped [−1, 1]. Difference per-domain scaled.',
         fontsize=FS_SUPTITLE, fontweight='bold')
     for row, domain in enumerate(active):
@@ -1412,7 +1434,7 @@ def save_nie_heatmap(base_stats, instruct_stats, out_dir):
 
 def save_alp_heatmap(base_stats, instruct_stats, out_dir):
     """
-    AbsLogProb heatmap: Base (s2-51B) | Instruct (step2000) | Difference
+    AbsLogProb heatmap: Base (main) | Instruct (step2000) | Difference
     Raw patched scores (abs log prob diff at each position×layer) — not NIE-normalized.
     X: [subject], [pre-target], [target]
     Y: layer 0–15, L0 at top
@@ -1433,7 +1455,7 @@ def save_alp_heatmap(base_stats, instruct_stats, out_dir):
     def _draw_row(row_axes, domain):
         ax0, ax1, ax2 = row_axes
         sb = _npz_domain_stats('OLMo-2-0425-1B', 'allenai',
-                               'stage2-ingredient3-step23852-tokens51B', domain, 'zip')
+                               'main', domain, 'main_zip')
         si = _npz_domain_stats('OLMo-2-0425-1B-Instruct', 'allenai',
                                'step_2000', domain, 'local')
         if not sb or not si:
@@ -1456,7 +1478,7 @@ def save_alp_heatmap(base_stats, instruct_stats, out_dir):
                          vmin=-dlim, vmax=dlim)
 
         for ax, ttl in zip([ax0, ax1, ax2],
-                           ['Base (s2-51B)', 'Instruct (step2000)', 'Inst − Base']):
+                           ['Base (main)', 'Instruct (step2000)', 'Inst − Base']):
             ax.set_title(f'{domain.capitalize()} — {ttl}', fontsize=FS_TITLE)
             ax.set_xticks([0, 1, 2])
             ax.set_xticklabels(POS_LABELS, fontsize=FS_TICK, rotation=20, ha='right')
@@ -1488,7 +1510,7 @@ def save_alp_heatmap(base_stats, instruct_stats, out_dir):
     nr = len(active)
     fig, axes = plt.subplots(nr, 3, figsize=(12, 5 * nr), constrained_layout=True)
     fig.suptitle(
-        'AbsLogProb heatmap — all domains  |  Base (s2-51B) vs Instruct (step2000)\n'
+        'AbsLogProb heatmap — all domains  |  Base (main) vs Instruct (step2000)\n'
         'Raw patched scores. YlOrRd for main panels. Difference in RdBu_r (red = amplified).',
         fontsize=FS_SUPTITLE, fontweight='bold')
     for row, domain in enumerate(active):
@@ -1509,11 +1531,11 @@ print('\n=== AbsLogProb heatmap (amplification) ===')
 save_alp_heatmap(base_stats, instruct_stats, COMPARE_DIR)
 
 
-# ── OLMo s2-51B vs Pythia step143k comparison ─────────────────────────────────
+# ── OLMo main vs Pythia step143k comparison ─────────────────────────────────
 
 def save_olmo_vs_pythia_prepost(base_stats, pythia_stats, out_dir):
     """
-    Compare s2-51B (OLMo end of pretraining) vs Pythia step143k (end of training).
+    Compare main (OLMo end of pretraining) vs Pythia step143k (end of training).
     Same 3-panel layout as save_prepost_comparison: bars + ALP lines + NIE lines.
     Per-domain PDFs: olmo-pythia-{domain}.pdf
     Composite PDF:   olmo-pythia-composite.pdf
@@ -1670,7 +1692,7 @@ def save_olmo_vs_pythia_prepost(base_stats, pythia_stats, out_dir):
         return fig
 
     SUPTITLE = (
-        'OLMo-2-0425-1B (s2-51B) vs Pythia-1B (step143k) — cross-architecture pre-training comparison\n'
+        'OLMo-2-0425-1B (main) vs Pythia-1B (step143k) — cross-architecture pre-training comparison\n'
         'Panel 1: Abs. log prob diff (bars)  |  Panel 2: Abs. log prob diff (lines)  |  Panel 3: NIE (independent y-axis)\n'
         'Solid = OLMo, hatched/dashed = Pythia. Panels 1 & 2 share y-axis.'
     )
@@ -1687,7 +1709,7 @@ def save_olmo_vs_pythia_prepost(base_stats, pythia_stats, out_dir):
 
 def save_olmo_pythia_nie_heatmap(base_stats, pythia_stats, out_dir):
     """
-    NIE heatmap: OLMo (s2-51B) | Pythia (step143k) | Difference (Pythia − OLMo)
+    NIE heatmap: OLMo (main) | Pythia (step143k) | Difference (Pythia − OLMo)
     Same layout as save_nie_heatmap.
     Outputs: {domain}-olmo-pythia-nie-heatmap.pdf, olmo-pythia-nie-heatmap-composite.pdf
     """
@@ -1723,7 +1745,7 @@ def save_olmo_pythia_nie_heatmap(base_stats, pythia_stats, out_dir):
         ax1.imshow(np.clip(mp, -1, 1),        vmin=-1, vmax=1, **kw)
         im2 = ax2.imshow(md,                  vmin=-dlim, vmax=dlim, **kw)
         for ax, ttl in zip([ax0, ax1, ax2],
-                           ['OLMo (s2-51B)', 'Pythia (step143k)', 'Pythia − OLMo']):
+                           ['OLMo (main)', 'Pythia (step143k)', 'Pythia − OLMo']):
             ax.set_title(f'{domain.capitalize()} — {ttl}', fontsize=FS_TITLE)
             ax.set_xticks([0, 1, 2])
             ax.set_xticklabels(POS_LABELS, fontsize=FS_TICK, rotation=15, ha='right')
@@ -1750,7 +1772,7 @@ def save_olmo_pythia_nie_heatmap(base_stats, pythia_stats, out_dir):
     nr = len(active)
     fig, axes = plt.subplots(nr, 3, figsize=(12, 5 * nr), constrained_layout=True)
     fig.suptitle(
-        'NIE heatmap — cross-architecture  |  OLMo (s2-51B) vs Pythia (step143k)\n'
+        'NIE heatmap — cross-architecture  |  OLMo (main) vs Pythia (step143k)\n'
         'Red = positive NIE. OLMo/Pythia clamped [−1, 1]. Difference per-domain scaled.',
         fontsize=FS_SUPTITLE, fontweight='bold')
     for row, domain in enumerate(active):
@@ -1764,7 +1786,7 @@ def save_olmo_pythia_nie_heatmap(base_stats, pythia_stats, out_dir):
 
 def save_olmo_pythia_alp_heatmap(base_stats, pythia_stats, out_dir):
     """
-    AbsLogProb heatmap: OLMo (s2-51B) | Pythia (step143k) | Difference
+    AbsLogProb heatmap: OLMo (main) | Pythia (step143k) | Difference
     Same layout as save_alp_heatmap.
     Outputs: {domain}-olmo-pythia-alp-heatmap.pdf, olmo-pythia-alp-heatmap-composite.pdf
     """
@@ -1798,7 +1820,7 @@ def save_olmo_pythia_alp_heatmap(base_stats, pythia_stats, out_dir):
         ax1.imshow(mp,       aspect='auto', cmap='YlOrRd', origin='upper', vmin=vmin, vmax=vmax)
         im2 = ax2.imshow(md, aspect='auto', cmap='RdBu_r', origin='upper', vmin=-dlim, vmax=dlim)
         for ax, ttl in zip([ax0, ax1, ax2],
-                           ['OLMo (s2-51B)', 'Pythia (step143k)', 'Pythia − OLMo']):
+                           ['OLMo (main)', 'Pythia (step143k)', 'Pythia − OLMo']):
             ax.set_title(f'{domain.capitalize()} — {ttl}', fontsize=FS_TITLE)
             ax.set_xticks([0, 1, 2])
             ax.set_xticklabels(POS_LABELS, fontsize=FS_TICK, rotation=15, ha='right')
@@ -1825,7 +1847,7 @@ def save_olmo_pythia_alp_heatmap(base_stats, pythia_stats, out_dir):
     nr = len(active)
     fig, axes = plt.subplots(nr, 3, figsize=(12, 5 * nr), constrained_layout=True)
     fig.suptitle(
-        'AbsLogProb heatmap — cross-architecture  |  OLMo (s2-51B) vs Pythia (step143k)\n'
+        'AbsLogProb heatmap — cross-architecture  |  OLMo (main) vs Pythia (step143k)\n'
         'Raw patched scores. YlOrRd for main panels. Difference in RdBu_r (red = Pythia stronger).',
         fontsize=FS_SUPTITLE, fontweight='bold')
     for row, domain in enumerate(active):
@@ -1837,7 +1859,7 @@ def save_olmo_pythia_alp_heatmap(base_stats, pythia_stats, out_dir):
     _savepdf(fig, os.path.join(out_dir, 'olmo-pythia-alp-heatmap-composite.pdf'))
 
 
-print('\n=== OLMo s2-51B vs Pythia step143k: pre-training comparison ===')
+print('\n=== OLMo main vs Pythia step143k: pre-training comparison ===')
 save_olmo_vs_pythia_prepost(base_stats, pythia_stats, COMPARE_DIR)
 
 print('\n=== OLMo vs Pythia: NIE heatmap ===')
