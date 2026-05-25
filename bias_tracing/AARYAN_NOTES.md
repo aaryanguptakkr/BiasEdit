@@ -183,39 +183,49 @@ plots/
     ├── post_to_pre/                            source: OLMo Instruct  →  target: OLMo base (same layout)
     ├── <domain>-directions-states.pdf          ← pre→post vs post→pre side-by-side, fixed Y-axis
     ├── <domain>-directions-words.pdf
-    ├── 4panel-<domain>-states.pdf              ← 4-panel comparison (see below)
-    ├── 4panel-<domain>-words.pdf
-    ├── 4panel-composite-states.pdf             ← all 4 domains, rows=domain cols=4 panels
-    └── 4panel-composite-words.pdf
+    ├── 4panel-step2000-<domain>-states.pdf     ← 4-panel comparison, also saved to main_body/ (see below)
+    ├── 4panel-step2000-<domain>-words.pdf      ← also saved to main_body/
+    ├── 4panel-step2000-composite-states.pdf    ← all domains, rows=domain cols=4 panels
+    └── 4panel-step2000-composite-words.pdf
+│
+└── main_body/                              ← key main-body figures saved here during computation
+    ├── nie-overlay-<domain>.pdf            ← NIE overlay (base vs instruct), reads NPZ directly
+    └── 4panel-step2000-<domain>-{states,words}.pdf  ← also in cross_patch/
 ```
 
-**4-panel plots** (`4panel-<domain>-{states,words}.pdf`):
-Each figure places four bar charts side-by-side with a shared Y-axis:
+**4-panel plots** (`4panel-step2000-<domain>-{states,words}.pdf`):
+Each figure places four bar charts side-by-side with a shared Y-axis.
+Files are saved to both `plots/cross_patch/` and `plots/main_body/` during computation via `extra_out_dir`.
 
 | Panel | Content | Data source |
 |---|---|---|
 | 1 | OLMo Stage 2 last ckpt (`s2-51B`) | within-model causal tracing (zip) |
-| 2 | OLMo Instruct last ckpt (`step2600`) | within-model causal tracing (zip) |
+| 2 | OLMo Instruct (`step_2000`) | within-model causal tracing (local NFS) |
 | 3 | Pre → Post cross-patch | local NFS cross-patch results |
 | 4 | Post → Pre cross-patch | local NFS cross-patch results |
 
 > **Checkpoint caveat:** Panels 3–4 use the HuggingFace main branch of each model, which for
-> the instruct model equals `step2600`, but for the base model may not exactly match `s2-51B`.
-> To be confirmed.
+> the base model may not exactly match `s2-51B`.
 
-**Full regeneration (three independent steps):**
+**Full regeneration:**
 
 ```bash
 cd bias_tracing
 
-# Step 1 — within-model bar charts + delta plots (reads zip, ~10–15 min)
-python fig.py --plots bars delta
+# Targeted recompute — only the figures affected by code changes
+python fig.py --plots appendix --source auto    # A5/A6 via NPZ (no stats.json dependency)
+python fig.py --plots cross_patch --source auto # 4panel + saves to main_body/
 
-# Step 2 — cross-patch plots (reads local NFS, ~5 min, no GPU)
-python fig.py --plots cross_patch
+# Paper table values (independent, reads NPZ directly)
+python scripts/table.py
 
-# Step 3 — comparison + line plots (reads stats.json, ~1 min, no GPU or zip)
+# Comparison/line plots (reads stats.json; run after bars if stats.json was regenerated)
 python scripts/regenerate_compare_plots.py
+```
+
+Or run within-model bars separately (not needed unless regenerating all figures):
+```bash
+python fig.py --plots bars delta   # ~10–15 min, reads zip
 ```
 
 Steps 2 and 3 are independent of each other and can be run in any order after step 1.
@@ -275,8 +285,10 @@ python fig.py --plots cross_patch --bias gender          # one domain only
   within-model causal tracing results from the zip for a specific checkpoint, returning a result
   dict in the same format as `load_cross_patch_domain`. Used to pull the last checkpoints for
   the 4-panel plots without re-running the full within-model pipeline.
-- `save_cross_patch_4panel(within_model_panels, all_direction_results, domains, out_dir)` —
+- `save_cross_patch_4panel(within_model_panels, all_direction_results, domains, out_dir, extra_out_dir=None)` —
   generates the 4-panel comparison figures (per domain + composite) in `plots/cross_patch/`.
+  Pass `extra_out_dir` to also save figures to a second directory (e.g. `plots/main_body/`) during
+  computation, before the figure is closed — avoids a separate copy step.
 
 All functions are gated by `RUN_CROSS_PATCH` and controlled via `--plots cross_patch`.
 
@@ -322,6 +334,25 @@ Key changes:
 
 - `data/domain/profession.json` — 810 items
 - `data/domain/religion.json` — 79 items
+
+### fig.py changes (2026-05-24)
+
+**`_load_checkpoints_from_npz(model_name, num_sample=None)`** (new helper):
+- Replaces `_load_stats_json` for the A5 trajectory and A6 heatmap appendix figures.
+- Reads NPZ case files directly (local NFS → main.zip for base `main` ckpt → results.zip),
+  builds the same checkpoint list structure that `stats.json` would have provided.
+- Effect: A5/A6 always reflect NPZ ground truth and do not depend on `stats.json` being current.
+
+**`save_cross_patch_4panel` — `extra_out_dir=None` parameter:**
+- `extra_out_dir` added to `save_cross_patch_4panel` and propagated to `_draw_4panel` as `extra_path`.
+- `_draw_4panel` calls `fig.savefig(extra_path, ...)` before `_savepdf` closes the figure.
+- At the call site: `extra_out_dir = os.path.join(PLOTS_BASE, 'main_body')`.
+- Effect: `4panel-step2000-{domain}-{states,words}.pdf` saved to both `plots/cross_patch/`
+  and `plots/main_body/` in one pass.
+
+**A6 `_build_matrix` dedup fix:**
+- `step2000_inserted` now initialised as `any(l == 'step2000' for l, _ in inst_pts)` instead of `False`.
+- Prevents a duplicate `step_2000` row when `_load_checkpoints_from_npz` already includes it.
 
 ---
 

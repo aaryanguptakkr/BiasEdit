@@ -18,6 +18,7 @@ from tqdm import tqdm
 # ── paths ─────────────────────────────────────────────────────────────────────
 
 ZIP_PATH   = '/deepfreeze/share/xuxin_transfer/bias_tracing/results.zip'
+MAIN_ZIP   = '/deepfreeze/share/xuxin_transfer/bias_tracing/main.zip'
 LOCAL_BASE = '/deepfreeze/aag026/Aaryan2/BiasEdit/bias_tracing/results'
 PLOTS_BASE = '/deepfreeze/aag026/Aaryan2/BiasEdit/bias_tracing/plots'
 
@@ -41,6 +42,7 @@ MODEL_CONFIGS = {
             ('stage2-ingredient3-step1000-tokens3B',    's2-3B'),
             ('stage2-ingredient3-step11000-tokens24B',  's2-24B'),
             ('stage2-ingredient3-step23852-tokens51B',  's2-51B'),
+            ('main',                                    'main'),
         ],
     },
     'OLMo-2-0425-1B-Instruct': {
@@ -48,6 +50,7 @@ MODEL_CONFIGS = {
         'checkpoints': [
             ('step_200',  'step200'),
             ('step_1400', 'step1400'),
+            ('step_2000', 'step2000'),
             ('step_2600', 'step2600'),
         ],
     },
@@ -125,7 +128,8 @@ BAR_WIDTH = 0.25
 
 # ── domain / plot constants ───────────────────────────────────────────────────
 
-BIAS_TYPES = ['gender', 'profession', 'race', 'religion']
+BIAS_TYPES    = ['gender', 'profession', 'race', 'religion']
+PAPER_DOMAINS = ['gender', 'race', 'profession']  # domains used in paper figures (no religion)
 
 LOW_SIGNAL = 0.03  # effect_gap below this → ⚠ marker; tracing estimates unreliable
 
@@ -141,7 +145,9 @@ WORDS_LABELS = [
 ]
 
 # Standardized bar colors: blue (full restore), red (Attn severed / MLP-only), green (MLP severed / Attn-only)
-BAR_COLORS = ['#1f77b4', '#d62728', '#2ca02c']
+BAR_COLORS    = ['#1f77b4', '#d62728', '#2ca02c']  # states bars
+STATES_COLORS = BAR_COLORS                          # alias used in appendix grids
+WORDS_COLORS  = ['#9467bd', '#ff7f0e', '#17becf']  # distinct palette for words bars
 
 Y_LABEL_BARS = 'Abs. log prob diff (stereo − anti)'
 Y_LABEL_NIE  = 'NIE (normalized indirect effect)'
@@ -223,20 +229,26 @@ def collect_scores(file_list, loader):
 
 # ── plotting helpers ──────────────────────────────────────────────────────────
 
-def _draw_bars(ax, r1, r2, r3, labels, colors, num_layer, xlabel, ylabel, title):
+def _draw_bars(ax, r1, r2, r3, labels, colors, num_layer, xlabel, ylabel, title,
+               fs_label=None, fs_tick=None, fs_title=None):
     """
     Draw a 3-bar-per-layer bar chart. Auto-sets ylim from data; callers
     can call ax.set_ylim() afterwards to override (e.g. for fixed axes).
+    fs_label/fs_tick override FS_LABEL/FS_TICK when provided; title always uses FS_TITLE.
     """
+    _fl = fs_label if fs_label is not None else FS_LABEL
+    _ft = fs_title if fs_title is not None else FS_TITLE
     xs = np.arange(len(r1))
     ax.bar(xs,                 r1, color=colors[0], width=BAR_WIDTH, edgecolor='gray', label=labels[0])
     ax.bar(xs + BAR_WIDTH,     r2, color=colors[1], width=BAR_WIDTH, edgecolor='gray', label=labels[1])
     ax.bar(xs + 2 * BAR_WIDTH, r3, color=colors[2], width=BAR_WIDTH, edgecolor='gray', label=labels[2])
-    ax.set_xlabel(xlabel, fontweight='bold', fontsize=FS_LABEL)
+    ax.set_xlabel(xlabel, fontweight='bold', fontsize=_fl)
     ax.set_xticks(np.arange(0, num_layer, max(1, num_layer // 8)))
-    ax.set_ylabel(ylabel, fontsize=FS_LABEL)
-    ax.set_title(title, fontsize=FS_TITLE)
+    ax.set_ylabel(ylabel, fontsize=_fl)
+    ax.set_title(title, fontsize=_ft)
     ax.legend(fontsize=FS_LEGEND)
+    if fs_tick is not None:
+        ax.tick_params(labelsize=fs_tick)
     all_vals = np.concatenate([r1, r2, r3])
     margin = (all_vals.max() - all_vals.min()) * 0.1 or 0.05
     ax.set_ylim(all_vals.min() - margin, all_vals.max() + margin)

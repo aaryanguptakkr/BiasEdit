@@ -62,14 +62,16 @@ import math
 import numpy as np
 from tqdm import tqdm
 import matplotlib
+from matplotlib.patches import Patch
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from plot_utils import (
-    ZIP_PATH, LOCAL_BASE, PLOTS_BASE,
-    MODEL_CONFIGS, BIAS_TYPES,
+    ZIP_PATH, MAIN_ZIP, LOCAL_BASE, PLOTS_BASE,
+    MODEL_CONFIGS, BIAS_TYPES, PAPER_DOMAINS,
     CROSS_PATCH_BASE, CROSS_PATCH_CONFIGS,
-    STATES_LABELS, WORDS_LABELS, BAR_COLORS, LOW_SIGNAL, Y_LABEL_BARS,
+    STATES_LABELS, WORDS_LABELS, BAR_COLORS, STATES_COLORS, WORDS_COLORS,
+    LOW_SIGNAL, Y_LABEL_BARS, Y_LABEL_NIE,
     FS_SUPTITLE, FS_TITLE, FS_LABEL, FS_TICK, FS_LEGEND, FS_ANNOT,
     FIG_BAR_W_SINGLE, FIG_BAR_H_SINGLE, FIG_BAR_W_PER_COL,
     FIG_GRID_W_PER_COL, FIG_ROW_H, FIG_LINE_W_PER_PAN, FIG_TRAJ_H,
@@ -81,7 +83,7 @@ from plot_utils import (
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
-PLOT_CHOICES = ['bars', 'delta', 'compare', 'cross_patch']
+PLOT_CHOICES = ['bars', 'delta', 'compare', 'cross_patch', 'appendix']
 
 parser = argparse.ArgumentParser(
     formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -126,6 +128,7 @@ RUN_BARS        = 'bars'        in _plots
 RUN_DELTA       = 'delta'       in _plots
 RUN_COMPARE     = 'compare'     in _plots
 RUN_CROSS_PATCH = 'cross_patch' in _plots
+RUN_APPENDIX    = 'appendix'    in _plots
 
 models_to_run      = [args.model]     if args.model     else list(MODEL_CONFIGS.keys())
 domains_to_run     = [args.bias]      if args.bias       else BIAS_TYPES
@@ -981,12 +984,72 @@ def load_within_model_from_zip(zf, zip_names_all, model_name, org, checkpoint, d
     }
 
 
-def save_cross_patch_4panel(within_model_panels, all_direction_results, domains, out_dir):
+def load_within_model_from_local(model_name, org, checkpoint, domain, num_sample=None):
+    """
+    Load within-model causal tracing results from the local filesystem for one
+    (model, checkpoint, domain) triple.  Returns a result dict in the same
+    format as load_within_model_from_zip, or None on failure.
+    """
+    cases_dir = local_cases_dir(model_name, org, checkpoint, domain)
+    if not os.path.isdir(cases_dir):
+        print(f'    [4panel] No local directory: {cases_dir}; skipping.')
+        return None
+
+    all_local    = sorted(os.listdir(cases_dir))
+    single_b, attn_b, mlp_b = partition_names(all_local)
+    single_items = [os.path.join(cases_dir, b) for b in single_b[:num_sample]]
+    attn_items   = [os.path.join(cases_dir, b) for b in attn_b[:num_sample]]
+    mlp_items    = [os.path.join(cases_dir, b) for b in mlp_b[:num_sample]]
+    loader       = load_npz_local
+
+    print(f'    single={len(single_items)}, attn={len(attn_items)}, mlp={len(mlp_items)}')
+    if not single_items:
+        return None
+
+    try:
+        num_layer = loader(single_items[0])['scores'].shape[-1]
+    except Exception as ex:
+        print(f'    [4panel] Cannot read sample: {ex}')
+        return None
+
+    bias_mean, pre_blank_mean, blank_mean, n_cases, mean_high, mean_low = \
+        collect_scores(single_items, loader)
+    attn_mean, _, _, _, _, _ = collect_scores(attn_items, loader)
+    mlp_mean,  _, _, _, _, _ = collect_scores(mlp_items,  loader)
+
+    if bias_mean is None:
+        return None
+
+    zero           = np.zeros(num_layer)
+    attn_mean      = attn_mean      if attn_mean      is not None else zero
+    mlp_mean       = mlp_mean       if mlp_mean       is not None else zero
+    pre_blank_mean = pre_blank_mean if pre_blank_mean is not None else zero
+    blank_mean     = blank_mean     if blank_mean     is not None else zero
+
+    effect_gap = mean_high - mean_low
+    return {
+        'bias_mean':      bias_mean,
+        'pre_blank_mean': pre_blank_mean,
+        'blank_mean':     blank_mean,
+        'attn_mean':      attn_mean,
+        'mlp_mean':       mlp_mean,
+        'n_cases':        n_cases,
+        'mean_high':      mean_high,
+        'mean_low':       mean_low,
+        'effect_gap':     effect_gap,
+        'low_sig':        effect_gap < LOW_SIGNAL,
+        'num_layer':      num_layer,
+    }
+
+
+def save_cross_patch_4panel(within_model_panels, all_direction_results, domains, out_dir,
+                            inst_label='OLMo Instruct\n(step2600)', file_prefix='4panel',
+                            extra_out_dir=None):
     """
     4-panel comparison per domain (and composite over all domains):
 
       Panel 1 — OLMo Stage 2 last checkpoint  (within-model causal tracing)
-      Panel 2 — OLMo Instruct last checkpoint  (within-model causal tracing)
+      Panel 2 — OLMo Instruct checkpoint       (within-model causal tracing)
       Panel 3 — Pre → Post cross-patch
       Panel 4 — Post → Pre cross-patch
 
@@ -996,18 +1059,20 @@ def save_cross_patch_4panel(within_model_panels, all_direction_results, domains,
     all_direction_results: {direction_key: {domain: result_dict}}
     domains              : ordered list of domains to include
     out_dir              : plots/cross_patch/
+    inst_label           : panel title for the instruct column
+    file_prefix          : prefix for output filenames (default '4panel')
 
     Output files:
-      4panel-{domain}-states.pdf
-      4panel-{domain}-words.pdf
-      4panel-composite-states.pdf
-      4panel-composite-words.pdf
+      {file_prefix}-{domain}-states.pdf
+      {file_prefix}-{domain}-words.pdf
+      {file_prefix}-composite-states.pdf
+      {file_prefix}-composite-words.pdf
     """
     PANEL_DEFS = [
-        ('s2_last',    'OLMo Stage 2\n(s2-51B)',     'within'),
-        ('inst_last',  'OLMo Instruct\n(step2600)',   'within'),
-        ('pre_to_post', 'Pre → Post',                 'cross'),
-        ('post_to_pre', 'Post → Pre',                 'cross'),
+        ('s2_last',    'OLMo-2-0425-1B\n(pre)',  'within'),
+        ('inst_last',  inst_label,               'within'),
+        ('pre_to_post', 'Pre → Post',             'cross'),
+        ('post_to_pre', 'Post → Pre',             'cross'),
     ]
 
     def _get_res(key, src, domain):
@@ -1030,7 +1095,7 @@ def save_cross_patch_4panel(within_model_panels, all_direction_results, domains,
         margin = (np.nanmax(flat) - np.nanmin(flat)) * 0.12 or 0.05
         return np.nanmin(flat) - margin, np.nanmax(flat) + margin
 
-    def _fill_ax(ax, res, plot_type, labels_list, title, y_min, y_max):
+    def _fill_ax(ax, res, plot_type, labels_list, title, y_min, y_max, show_ylabel=True):
         if res is None:
             ax.set_visible(False)
             return
@@ -1038,8 +1103,12 @@ def save_cross_patch_4panel(within_model_panels, all_direction_results, domains,
             r1, r2, r3 = res['bias_mean'], res['mlp_mean'], res['attn_mean']
         else:
             r1, r2, r3 = res['bias_mean'], res['pre_blank_mean'], res['blank_mean']
+        ylabel = Y_LABEL_BARS if show_ylabel else ''
         _draw_bars(ax, r1, r2, r3, labels_list, BAR_COLORS, res['num_layer'],
-                   'Layer', Y_LABEL_BARS, title)
+                   'Layer', ylabel, title,
+                   fs_label=FS_LABEL+6, fs_tick=FS_TICK+6, fs_title=FS_TITLE+5)
+        ax.tick_params(axis='y', labelsize=FS_TICK+6)
+        ax.set_xlabel('Layer', fontsize=FS_LABEL+5, fontweight='bold')
         ax.set_ylim(y_min, y_max)
         ax.axhline(0, color='black', linewidth=0.8, linestyle='--', zorder=0)
         if res['low_sig']:
@@ -1050,23 +1119,84 @@ def save_cross_patch_4panel(within_model_panels, all_direction_results, domains,
     for plot_type in ('states', 'words'):
         labels_list = STATES_LABELS if plot_type == 'states' else WORDS_LABELS
 
+        def _shared_legend(fig):
+            legend_handles = [Patch(facecolor=c, edgecolor='gray', label=l)
+                              for c, l in zip(BAR_COLORS, labels_list)]
+            fig.legend(handles=legend_handles, loc='lower center',
+                       bbox_to_anchor=(0.5, 0.0), ncol=3, fontsize=FS_LEGEND + 7, frameon=True)
+
+        def _label_ax(ax, letter):
+            ax.text(0.02, 0.98, letter, transform=ax.transAxes,
+                    fontsize=FS_TITLE + 2, fontweight='bold', va='top', ha='left',
+                    zorder=10, clip_on=False,
+                    bbox=dict(boxstyle='round,pad=0.15', facecolor='white',
+                              alpha=0.85, edgecolor='gray', linewidth=0.5))
+
+        def _draw_4panel(panels_data, suptitle, out_path, extra_path=None):
+            y_min, y_max = _shared_ylim(panels_data, plot_type)
+            if y_min is None:
+                return
+            fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+            for i, (ax, (key, label, src), res) in enumerate(
+                    zip(axes, PANEL_DEFS, panels_data)):
+                _fill_ax(ax, res, plot_type, labels_list,
+                         f'({"abcd"[i]}) {label}', y_min, y_max,
+                         show_ylabel=(i == 0))
+                leg = ax.get_legend()
+                if leg:
+                    leg.remove()
+            _shared_legend(fig)
+            fig.tight_layout(rect=[0, 0.10, 1, 1.0])
+            if extra_path:
+                os.makedirs(os.path.dirname(extra_path), exist_ok=True)
+                fig.savefig(extra_path, format='pdf', bbox_inches='tight')
+                print(f'    Saved: {extra_path}')
+            _savepdf(fig, out_path)
+
+        def _draw_2panel(defs_subset, data_subset, suptitle, out_path):
+            y_min, y_max = _shared_ylim(data_subset, plot_type)
+            if y_min is None:
+                return
+            fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+            fig.suptitle(suptitle, fontsize=FS_SUPTITLE, fontweight='bold')
+            for i, (ax, (key, label, src), res) in enumerate(
+                    zip(axes, defs_subset, data_subset)):
+                _fill_ax(ax, res, plot_type, labels_list, label, y_min, y_max)
+                leg = ax.get_legend()
+                if leg:
+                    leg.remove()
+                _label_ax(ax, 'AB'[i])
+            _shared_legend(fig)
+            fig.tight_layout(rect=[0, 0.12, 1, 0.92])
+            _savepdf(fig, out_path)
+
         # ── per-domain figures ────────────────────────────────────────────────
         for domain in domains:
             panels_data = [_get_res(key, src, domain) for key, _, src in PANEL_DEFS]
-            y_min, y_max = _shared_ylim(panels_data, plot_type)
-            if y_min is None:
-                continue
+            dom = domain.capitalize()
 
-            fig, axes = plt.subplots(1, 4, figsize=(FIG_BAR_W_PER_COL * 4, FIG_ROW_H))
-            fig.suptitle(
-                f'{domain.capitalize()} bias — 4-panel cross-patch comparison ({plot_type})\n'
-                'Cols 1–2: within-model causal tracing  |  Cols 3–4: cross-model patching  '
-                '|  Y-axis fixed across panels',
-                fontsize=FS_SUPTITLE, fontweight='bold')
-            for ax, (key, label, src), res in zip(axes, PANEL_DEFS, panels_data):
-                _fill_ax(ax, res, plot_type, labels_list, label, y_min, y_max)
-            plt.tight_layout()
-            _savepdf(fig, os.path.join(out_dir, f'4panel-{domain}-{plot_type}.pdf'))
+            # Layout 1: 2×2 four-panel (A=Stage2, B=Instruct, C=Pre→Post, D=Post→Pre)
+            _fname = f'{file_prefix}-{domain}-{plot_type}.pdf'
+            _draw_4panel(
+                panels_data,
+                f'{dom} bias — 4-panel cross-patch comparison ({plot_type})\n'
+                'Cols 1–2: within-model  |  Cols 3–4: cross-model  |  Y-axis fixed across panels',
+                os.path.join(out_dir, _fname),
+                extra_path=os.path.join(extra_out_dir, _fname) if extra_out_dir else None)
+
+            # Layout 2: within-model — Stage 2 (s2-51B) vs Instruct (step2000)
+            _draw_2panel(
+                PANEL_DEFS[:2], panels_data[:2],
+                f'{dom} bias — within-model: Stage 2 vs Instruct ({plot_type})\n'
+                'Y-axis fixed across panels',
+                os.path.join(out_dir, f'{file_prefix}-{domain}-{plot_type}-within.pdf'))
+
+            # Layout 3: cross-patch — Pre→Post vs Post→Pre
+            _draw_2panel(
+                PANEL_DEFS[2:], panels_data[2:],
+                f'{dom} bias — cross-patch: Pre→Post vs Post→Pre ({plot_type})\n'
+                'Y-axis fixed across panels',
+                os.path.join(out_dir, f'{file_prefix}-{domain}-{plot_type}-cross.pdf'))
 
         # ── composite: all domains, rows=domains cols=panels ─────────────────
         n_domains = len(domains)
@@ -1090,7 +1220,769 @@ def save_cross_patch_4panel(within_model_panels, all_direction_results, domains,
                 row_label = f'{domain.capitalize()} — {label}'
                 _fill_ax(axes[row, col], res, plot_type, labels_list, row_label, y_min, y_max)
         plt.tight_layout()
-        _savepdf(fig, os.path.join(out_dir, f'4panel-composite-{plot_type}.pdf'))
+        _savepdf(fig, os.path.join(out_dir, f'{file_prefix}-composite-{plot_type}.pdf'))
+
+
+# ── appendix data helper ──────────────────────────────────────────────────────
+
+def _load_from_main_zip(main_zf, domain, num_sample=None):
+    """
+    Load causal-tracing result dict from main.zip for one domain.
+    Path structure in zip: main/{domain}/causal_trace/cases/
+    Returns a result dict in the same format as load_cross_patch_domain, or None.
+    """
+    prefix = f'main/{domain}/causal_trace/cases/'
+    names  = [n for n in main_zf.namelist() if n.startswith(prefix) and n.endswith('.npz')]
+    if not names:
+        print(f'    [main.zip] No files for {domain} at {prefix}')
+        return None
+    basenames    = [os.path.basename(n) for n in names]
+    single_b, attn_b, mlp_b = partition_names(basenames)
+    name_map     = {os.path.basename(n): n for n in names}
+    single_items = [name_map[b] for b in single_b[:num_sample] if b in name_map]
+    attn_items   = [name_map[b] for b in attn_b[:num_sample]   if b in name_map]
+    mlp_items    = [name_map[b] for b in mlp_b[:num_sample]    if b in name_map]
+    loader       = lambda p: load_npz_zip(main_zf, p)
+    print(f'    [main.zip] {domain}: single={len(single_items)}, attn={len(attn_items)}, mlp={len(mlp_items)}')
+    if not single_items:
+        return None
+    try:
+        num_layer = loader(single_items[0])['scores'].shape[-1]
+    except Exception as ex:
+        print(f'    [main.zip] Cannot read sample: {ex}')
+        return None
+    bias_mean, pre_blank_mean, blank_mean, n_cases, mean_high, mean_low = \
+        collect_scores(single_items, loader)
+    attn_mean, _, _, _, _, _ = collect_scores(attn_items, loader)
+    mlp_mean,  _, _, _, _, _ = collect_scores(mlp_items,  loader)
+    if bias_mean is None:
+        return None
+    zero           = np.zeros(num_layer)
+    attn_mean      = attn_mean      if attn_mean      is not None else zero
+    mlp_mean       = mlp_mean       if mlp_mean       is not None else zero
+    pre_blank_mean = pre_blank_mean if pre_blank_mean is not None else zero
+    blank_mean     = blank_mean     if blank_mean     is not None else zero
+    effect_gap = mean_high - mean_low
+    return {
+        'bias_mean':      bias_mean,
+        'pre_blank_mean': pre_blank_mean,
+        'blank_mean':     blank_mean,
+        'attn_mean':      attn_mean,
+        'mlp_mean':       mlp_mean,
+        'n_cases':        n_cases,
+        'mean_high':      mean_high,
+        'mean_low':       mean_low,
+        'effect_gap':     effect_gap,
+        'low_sig':        effect_gap < LOW_SIGNAL,
+        'num_layer':      num_layer,
+    }
+
+
+# ── appendix grid helpers ─────────────────────────────────────────────────────
+
+def _row_ylim(results_dict, paper_domains, *keys):
+    """Per-row (y_min, y_max) pooled across all domains for the given key set."""
+    all_vals = []
+    for d in paper_domains:
+        res = results_dict.get(d)
+        if res is None:
+            continue
+        for k in keys:
+            v = res.get(k)
+            if v is not None:
+                all_vals.append(v)
+    if not all_vals:
+        return None, None
+    flat   = np.concatenate(all_vals)
+    margin = (float(flat.max()) - float(flat.min())) * 0.12 or 0.05
+    return float(flat.min()) - margin, float(flat.max()) + margin
+
+
+def _bars_grid(axes, row_specs, paper_domains, row_ylims):
+    """
+    Fill a rows×cols axes grid with labelled bar charts.
+
+    axes         : 2-D numpy array of Axes, shape (n_rows, len(paper_domains))
+    row_specs    : list of (results_dict, plot_type, bar_colors, model_label, type_label)
+      plot_type  : 'states' or 'words'
+      bar_colors : 3-element list of colors for the three bars
+    paper_domains : ordered list of domain strings
+    row_ylims    : list of (y_min, y_max) per row; None entries mean auto-scale
+    """
+    alphabet   = 'abcdefghijklmnopqrstuvwxyz'
+    letter_idx = 0
+
+    for row, (results_dict, plot_type, bar_colors, model_label, type_label) in enumerate(row_specs):
+        y_min_r, y_max_r = row_ylims[row] if row_ylims is not None else (None, None)
+        for col, domain in enumerate(paper_domains):
+            ax     = axes[row, col]
+            res    = results_dict.get(domain)
+            letter = alphabet[letter_idx]
+            letter_idx += 1
+            title  = f'({letter}) {domain.capitalize()} bias {type_label}\n({model_label})'
+
+            if res is None:
+                ax.set_visible(False)
+                continue
+
+            if plot_type == 'states':
+                r1, r2, r3  = res['bias_mean'], res['mlp_mean'], res['attn_mean']
+                labels_list = STATES_LABELS
+            else:
+                r1, r2, r3  = res['bias_mean'], res['pre_blank_mean'], res['blank_mean']
+                labels_list = WORDS_LABELS
+
+            _draw_bars(ax, r1, r2, r3, labels_list, bar_colors, res['num_layer'],
+                       'Layer', Y_LABEL_BARS if col == 0 else '', title,
+                       fs_label=FS_LABEL+3, fs_tick=FS_TICK+3)
+
+            if y_min_r is not None:
+                ax.set_ylim(y_min_r, y_max_r)
+
+            ax.axhline(0, color='black', linewidth=0.6, linestyle='--', alpha=0.4, zorder=0)
+            leg = ax.get_legend()
+            if leg:
+                leg.remove()
+
+            if res['low_sig']:
+                ax.set_facecolor(LOW_SIG_BG)
+                ax.text(0.98, 0.97, '⚠', transform=ax.transAxes,
+                        fontsize=FS_ANNOT, ha='right', va='top', color=LOW_SIG_COLOR)
+
+
+def _states_words_legend(fig, bottom_frac=0.10):
+    """
+    Single centered legend with 2 rows: States (row 1) + Words (row 2), ncol=3.
+    States bars use STATES_COLORS; words bars use WORDS_COLORS.
+    """
+    patches = (
+        [Patch(facecolor=STATES_COLORS[i], edgecolor='gray', label=STATES_LABELS[i])
+         for i in range(3)] +
+        [Patch(facecolor=WORDS_COLORS[i],  edgecolor='gray', label=WORDS_LABELS[i])
+         for i in range(3)]
+    )
+    fig.legend(handles=patches, loc='lower center', bbox_to_anchor=(0.5, 0.0),
+               ncol=3, fontsize=FS_LEGEND + 5, frameon=True)
+
+
+# ── appendix A1: OLMo base + instruct bars (4×3) ─────────────────────────────
+
+def save_appendix_A1_olmo_bars(out_dir, num_sample=None, main_zf=None):
+    """
+    Appendix A1: 4×3 grid for OLMo-2-0425-1B (main) and OLMo-2-0425-1B-Instruct (step_2000).
+    Row 0 base states · Row 1 base words · Row 2 instruct states · Row 3 instruct words.
+    Columns: gender, race, profession.
+    States bars use STATES_COLORS; words bars use WORDS_COLORS.
+    Single global Y-axis across all 12 panels.
+    """
+    print('  [A1] Loading OLMo base from main.zip...')
+    _own_zf = main_zf is None
+    if _own_zf:
+        main_zf = zipfile.ZipFile(MAIN_ZIP, 'r')
+    base_results = {d: _load_from_main_zip(main_zf, d, num_sample) for d in PAPER_DOMAINS}
+    if _own_zf:
+        main_zf.close()
+
+    print('  [A1] Loading OLMo instruct from local (step_2000)...')
+    inst_results = {d: load_within_model_from_local(
+        'OLMo-2-0425-1B-Instruct', 'allenai', 'step_2000', d, num_sample)
+        for d in PAPER_DOMAINS}
+
+    row_specs = [
+        (base_results, 'states', STATES_COLORS, 'OLMo-2-0425-1B',          'effect of states'),
+        (base_results, 'words',  WORDS_COLORS,  'OLMo-2-0425-1B',          'effect of different words'),
+        (inst_results, 'states', STATES_COLORS, 'OLMo-2-0425-1B-Instruct', 'effect of states'),
+        (inst_results, 'words',  WORDS_COLORS,  'OLMo-2-0425-1B-Instruct', 'effect of different words'),
+    ]
+    row_ylims = [
+        _row_ylim(base_results, PAPER_DOMAINS, 'bias_mean', 'mlp_mean', 'attn_mean'),
+        _row_ylim(base_results, PAPER_DOMAINS, 'bias_mean', 'pre_blank_mean', 'blank_mean'),
+        _row_ylim(inst_results, PAPER_DOMAINS, 'bias_mean', 'mlp_mean', 'attn_mean'),
+        _row_ylim(inst_results, PAPER_DOMAINS, 'bias_mean', 'pre_blank_mean', 'blank_mean'),
+    ]
+
+    fig, axes = plt.subplots(4, 3, figsize=(FIG_BAR_W_PER_COL * 3, FIG_ROW_H * 4))
+    _bars_grid(axes, row_specs, PAPER_DOMAINS, row_ylims)
+    _states_words_legend(fig)
+    fig.tight_layout(rect=[0, 0.07, 1, 1.0])
+    _savepdf(fig, os.path.join(out_dir, 'A1-olmo-bars.pdf'))
+
+
+# ── appendix A2: Pythia bars (2×3) ───────────────────────────────────────────
+
+def save_appendix_A2_pythia_bars(out_dir, num_sample=None):
+    """
+    Appendix A2: 2×3 grid for Pythia-1B (step143000).
+    Row 0 states · Row 1 words. Columns: gender, race, profession.
+    States bars use STATES_COLORS; words bars use WORDS_COLORS.
+    Single global Y-axis across all 6 panels.
+    """
+    print('  [A2] Loading Pythia-1B (step143000) from results.zip...')
+    pythia_results = {d: load_within_model_from_zip(
+        zf, zip_names_all, 'pythia-1b', 'EleutherAI', 'step143000', d, num_sample)
+        for d in PAPER_DOMAINS}
+
+    if not any(v is not None for v in pythia_results.values()):
+        print('  [A2] No data; skipping.')
+        return
+
+    row_specs = [
+        (pythia_results, 'states', STATES_COLORS, 'pythia-1b', 'effect of states'),
+        (pythia_results, 'words',  WORDS_COLORS,  'pythia-1b', 'effect of different words'),
+    ]
+    row_ylims = [
+        _row_ylim(pythia_results, PAPER_DOMAINS, 'bias_mean', 'mlp_mean', 'attn_mean'),
+        _row_ylim(pythia_results, PAPER_DOMAINS, 'bias_mean', 'pre_blank_mean', 'blank_mean'),
+    ]
+
+    fig, axes = plt.subplots(2, 3, figsize=(FIG_BAR_W_PER_COL * 3, FIG_ROW_H * 2))
+    _bars_grid(axes, row_specs, PAPER_DOMAINS, row_ylims)
+    _states_words_legend(fig)
+    fig.tight_layout(rect=[0, 0.11, 1, 1.0])
+    _savepdf(fig, os.path.join(out_dir, 'A2-pythia-bars.pdf'))
+
+
+# ── appendix A3: NIE line plots (4×3) ────────────────────────────────────────
+
+def save_appendix_A3_nie_lines(out_dir, num_sample=None, main_zf=None):
+    """
+    Appendix A3: 4×3 NIE layer-profile figure.
+    Row 0: OLMo base (solid) vs OLMo Instruct (dashed) — states NIE — 3 domains.
+    Row 1: OLMo base (solid) vs OLMo Instruct (dashed) — words  NIE — 3 domains.
+    Row 2: OLMo base (solid) vs Pythia (dashed)         — states NIE — 3 domains.
+    Row 3: OLMo base (solid) vs Pythia (dashed)         — words  NIE — 3 domains.
+
+    States rows use BAR_COLORS; words rows use WORDS_COLORS.
+    States rows share one Y-range; words rows share a separate Y-range.
+    """
+    from matplotlib.lines import Line2D
+
+    A3_FS_TITLE  = FS_TITLE + 1      # 11
+    A3_FS_LABEL  = FS_LABEL  + 5   # 14
+    A3_FS_TICK   = FS_TICK   + 4   # 12
+    A3_FS_LEGEND = FS_LEGEND + 6   # 13
+
+    print('  [A3] Loading OLMo base from main.zip...')
+    _own_zf = main_zf is None
+    if _own_zf:
+        main_zf = zipfile.ZipFile(MAIN_ZIP, 'r')
+    base_results = {d: _load_from_main_zip(main_zf, d, num_sample) for d in PAPER_DOMAINS}
+    if _own_zf:
+        main_zf.close()
+
+    print('  [A3] Loading OLMo instruct from local (step_2000)...')
+    inst_results = {d: load_within_model_from_local(
+        'OLMo-2-0425-1B-Instruct', 'allenai', 'step_2000', d, num_sample)
+        for d in PAPER_DOMAINS}
+
+    print('  [A3] Loading Pythia (step143000) from results.zip...')
+    pythia_results = {d: load_within_model_from_zip(
+        zf, zip_names_all, 'pythia-1b', 'EleutherAI', 'step143000', d, num_sample)
+        for d in PAPER_DOMAINS}
+
+    STATES_KEYS   = ('bias', 'mlp', 'attn')
+    STATES_LABELS_SHORT = ['States', 'Attn severed', 'MLP severed']
+    WORDS_KEYS    = ('bias', 'pre_blank', 'blank')
+    WORDS_LABELS_SHORT  = [
+        'Bias attribute words',
+        'Token before attribute',
+        'Attribute terms',
+    ]
+
+    def _nie(res, key):
+        """Compute NIE for a given data key in a result dict."""
+        key_map = {
+            'bias':      'bias_mean',
+            'mlp':       'mlp_mean',
+            'attn':      'attn_mean',
+            'pre_blank': 'pre_blank_mean',
+            'blank':     'blank_mean',
+        }
+        if res is None or res['effect_gap'] <= 0:
+            return None
+        arr = res.get(key_map[key])
+        if arr is None:
+            return None
+        arr = np.array(arr) if not isinstance(arr, np.ndarray) else arr
+        return (arr - res['mean_low']) / res['effect_gap']
+
+    # compute Y ranges separately for states rows and words rows
+    states_vals, words_vals = [], []
+    for results_dict in (base_results, inst_results, pythia_results):
+        for d in PAPER_DOMAINS:
+            res = results_dict.get(d)
+            for k in STATES_KEYS:
+                v = _nie(res, k)
+                if v is not None:
+                    states_vals.extend(v.tolist())
+            for k in WORDS_KEYS:
+                v = _nie(res, k)
+                if v is not None:
+                    words_vals.extend(v.tolist())
+
+    if not states_vals and not words_vals:
+        print('  [A3] No valid NIE data; skipping.')
+        return
+
+    def _yrange(vals):
+        if not vals:
+            return -0.1, 1.1
+        m = (max(vals) - min(vals)) * 0.12 or 0.05
+        return min(vals) - m, max(vals) + m
+
+    states_ymin, states_ymax = _yrange(states_vals)
+    words_ymin,  words_ymax  = _yrange(words_vals)
+
+    # 4 rows: (plot_type, model1_results, label1, model2_results, label2)
+    ROW_DEFS = [
+        ('states', base_results, 'OLMo-2-0425-1B (solid)',
+                   inst_results,    'OLMo-2-0425-1B-Instruct (dashed)'),
+        ('words',  base_results, 'OLMo-2-0425-1B (solid)',
+                   inst_results,    'OLMo-2-0425-1B-Instruct (dashed)'),
+        ('states', base_results, 'OLMo-2-0425-1B (solid)',
+                   pythia_results,  'Pythia-1B (dashed)'),
+        ('words',  base_results, 'OLMo-2-0425-1B (solid)',
+                   pythia_results,  'Pythia-1B (dashed)'),
+    ]
+    letters_all = list('abcdefghijkl')
+
+    fig, axes = plt.subplots(4, 3, figsize=(FIG_LINE_W_PER_PAN * 3, (FIG_ROW_H + 0.5) * 4))
+    letter_idx = 0
+
+    for row, (plot_type, model1_results, model1_label, model2_results, model2_label) in enumerate(ROW_DEFS):
+        is_states = (plot_type == 'states')
+        keys      = STATES_KEYS   if is_states else WORDS_KEYS
+        labels    = STATES_LABELS_SHORT if is_states else WORDS_LABELS_SHORT
+        colors    = BAR_COLORS    if is_states else WORDS_COLORS
+        ymin      = states_ymin   if is_states else words_ymin
+        ymax      = states_ymax   if is_states else words_ymax
+        type_tag  = 'States NIE'  if is_states else 'Words NIE'
+
+        for col, domain in enumerate(PAPER_DOMAINS):
+            ax     = axes[row, col]
+            letter = letters_all[letter_idx]
+            letter_idx += 1
+            res1 = model1_results.get(domain)
+            res2 = model2_results.get(domain)
+
+            for ki, (key, cond_label) in enumerate(zip(keys, labels)):
+                color = colors[ki]
+                nie1  = _nie(res1, key)
+                nie2  = _nie(res2, key)
+                if nie1 is not None:
+                    xs = np.arange(len(nie1))
+                    ax.plot(xs, nie1, color=color, linewidth=2.0, linestyle='-',
+                            marker='o', markersize=3)
+                if nie2 is not None:
+                    xs = np.arange(len(nie2))
+                    ax.plot(xs, nie2, color=color, linewidth=2.0, linestyle='--',
+                            marker='s', markersize=3)
+
+            ax.axhline(0, color='black', linewidth=0.7, alpha=0.4)
+            ax.set_title(
+                f'({letter}) {domain.capitalize()} — {type_tag}\n'
+                f'{model1_label} vs {model2_label}',
+                fontsize=A3_FS_TITLE)
+            ax.set_xlabel('Layer', fontsize=A3_FS_LABEL)
+            if col == 0:
+                ax.set_ylabel(Y_LABEL_NIE, fontsize=A3_FS_LABEL)
+            ax.set_ylim(ymin, ymax)
+            ax.set_xticks(np.arange(0, 16, max(1, 16 // 8)))
+            ax.tick_params(labelsize=A3_FS_TICK)
+            ax.grid(alpha=0.2)
+
+    # two legend blocks at bottom: states (BAR_COLORS) and words (WORDS_COLORS)
+    legend_handles = []
+    for ki, cond_label in enumerate(STATES_LABELS_SHORT):
+        c = BAR_COLORS[ki]
+        legend_handles.append(
+            Line2D([0], [0], color=c, linewidth=2, linestyle='-',
+                   marker='o', markersize=4, label=f'{cond_label} — solid'))
+        legend_handles.append(
+            Line2D([0], [0], color=c, linewidth=2, linestyle='--',
+                   marker='s', markersize=4, label=f'{cond_label} — dashed'))
+    # separator
+    legend_handles.append(Line2D([0], [0], color='none', label=''))
+    for ki, cond_label in enumerate(WORDS_LABELS_SHORT):
+        c = WORDS_COLORS[ki]
+        legend_handles.append(
+            Line2D([0], [0], color=c, linewidth=2, linestyle='-',
+                   marker='o', markersize=4, label=f'{cond_label} — solid'))
+        legend_handles.append(
+            Line2D([0], [0], color=c, linewidth=2, linestyle='--',
+                   marker='s', markersize=4, label=f'{cond_label} — dashed'))
+
+    fig.legend(handles=legend_handles, loc='lower center', bbox_to_anchor=(0.5, 0.0),
+               ncol=4, fontsize=A3_FS_LEGEND, frameon=True,
+               labelspacing=1.0, handlelength=3.0, handletextpad=0.8, columnspacing=2.5)
+    fig.tight_layout(rect=[0, 0.10, 1, 1.0])
+    _savepdf(fig, os.path.join(out_dir, 'A3-nie-lines.pdf'))
+
+
+# ── main body: NIE overlay (gender, single panel) ────────────────────────────
+
+def save_main_body_nie_overlay(out_dir, num_sample=None, main_zf=None):
+    """
+    Main body figure: single NIE panel for gender domain.
+    OLMo-2-0425-1B (solid) vs OLMo-2-0425-1B-Instruct (dashed).
+    3 restore conditions × 2 models = 6 lines.
+    Saved to out_dir/nie-overlay-gender.pdf
+    """
+    from matplotlib.lines import Line2D
+
+    print('  [NIE overlay] Loading OLMo base from main.zip...')
+    _own_zf = main_zf is None
+    if _own_zf:
+        main_zf = zipfile.ZipFile(MAIN_ZIP, 'r')
+    base_res = _load_from_main_zip(main_zf, 'gender', num_sample)
+    if _own_zf:
+        main_zf.close()
+
+    print('  [NIE overlay] Loading OLMo instruct (step_2000)...')
+    inst_res = load_within_model_from_local(
+        'OLMo-2-0425-1B-Instruct', 'allenai', 'step_2000', 'gender', num_sample)
+
+    NIE_KEYS   = ('states_nie', 'mlp_nie', 'attn_nie')
+    NIE_LABELS = ['States', 'Attn severed', 'MLP severed']
+
+    def _nie(res, key):
+        key_map = {'states_nie': 'bias_mean', 'mlp_nie': 'mlp_mean', 'attn_nie': 'attn_mean'}
+        if res is None or res['effect_gap'] <= 0:
+            return None
+        arr = np.array(res[key_map[key]])
+        return (arr - res['mean_low']) / res['effect_gap']
+
+    all_vals = []
+    for key in NIE_KEYS:
+        for res in (base_res, inst_res):
+            v = _nie(res, key)
+            if v is not None:
+                all_vals.extend(v.tolist())
+
+    if not all_vals:
+        print('  [NIE overlay] No data; skipping.')
+        return
+
+    margin = (max(all_vals) - min(all_vals)) * 0.12 or 0.05
+    y_min  = min(all_vals) - margin
+    y_max  = max(all_vals) + margin
+
+    fig, ax = plt.subplots(1, 1, figsize=(7.0, FIG_ROW_H + 0.5))
+
+    for ki, (key, cond_label) in enumerate(zip(NIE_KEYS, NIE_LABELS)):
+        color = BAR_COLORS[ki]
+        nie_b = _nie(base_res, key)
+        nie_i = _nie(inst_res, key)
+        xs    = np.arange(16)
+        if nie_b is not None:
+            ax.plot(xs, nie_b, color=color, linewidth=2.0, linestyle='-',
+                    marker='o', markersize=3)
+        if nie_i is not None:
+            ax.plot(xs, nie_i, color=color, linewidth=2.0, linestyle='--',
+                    marker='s', markersize=3)
+
+    ax.axhline(0, color='black', linewidth=0.7, alpha=0.4)
+    ax.set_title('(a) Gender\nOLMo-2-0425-1B (solid) vs OLMo-2-0425-1B-Instruct (dashed)',
+                 fontsize=FS_TITLE+3)
+    ax.set_xlabel('Layer', fontsize=FS_LABEL+5)
+    ax.set_ylabel('NIE (normalized indirect effect)', fontsize=FS_LABEL+5)
+    ax.set_ylim(y_min, y_max)
+    ax.set_xticks(np.arange(0, 16, 2))
+    ax.tick_params(labelsize=FS_TICK+4)
+    ax.grid(alpha=0.2)
+
+    legend_handles = []
+    for ki, cond_label in enumerate(NIE_LABELS):
+        c = BAR_COLORS[ki]
+        legend_handles.append(
+            Line2D([0], [0], color=c, linewidth=2, linestyle='-',
+                   marker='o', markersize=4, label=f'{cond_label} — Base (solid)'))
+        legend_handles.append(
+            Line2D([0], [0], color=c, linewidth=2, linestyle='--',
+                   marker='s', markersize=4, label=f'{cond_label} — Instruct (dashed)'))
+    fig.legend(handles=legend_handles, loc='lower center', bbox_to_anchor=(0.5, 0.0),
+               ncol=2, fontsize=FS_LEGEND + 5, frameon=True,
+               labelspacing=0.4, handlelength=1.8, handletextpad=0.4, columnspacing=0.8)
+    fig.tight_layout(rect=[0, 0.17, 1, 1.0])
+    _savepdf(fig, os.path.join(out_dir, 'nie-overlay-gender.pdf'))
+
+
+# ── appendix A4: cross-patch bars (4×3) ──────────────────────────────────────
+
+def save_appendix_A4_cross_patch_bars(all_direction_results, out_dir):
+    """
+    Appendix A4: 4×3 grid for cross-patch directions.
+    Row 0 Pre→Post states · Row 1 Pre→Post words ·
+    Row 2 Post→Pre states · Row 3 Post→Pre words.
+    Columns: gender, race, profession.
+    States bars use STATES_COLORS; words bars use WORDS_COLORS.
+    Single global Y-axis across all 12 panels.
+    """
+    pre  = all_direction_results.get('pre_to_post', {})
+    post = all_direction_results.get('post_to_pre', {})
+
+    if not pre and not post:
+        print('  [A4] No cross-patch data; skipping.')
+        return
+
+    row_specs = [
+        (pre,  'states', STATES_COLORS, 'Pre → Post', 'effect of states'),
+        (pre,  'words',  WORDS_COLORS,  'Pre → Post', 'effect of different words'),
+        (post, 'states', STATES_COLORS, 'Post → Pre', 'effect of states'),
+        (post, 'words',  WORDS_COLORS,  'Post → Pre', 'effect of different words'),
+    ]
+    row_ylims = [
+        _row_ylim(pre,  PAPER_DOMAINS, 'bias_mean', 'mlp_mean', 'attn_mean'),
+        _row_ylim(pre,  PAPER_DOMAINS, 'bias_mean', 'pre_blank_mean', 'blank_mean'),
+        _row_ylim(post, PAPER_DOMAINS, 'bias_mean', 'mlp_mean', 'attn_mean'),
+        _row_ylim(post, PAPER_DOMAINS, 'bias_mean', 'pre_blank_mean', 'blank_mean'),
+    ]
+
+    fig, axes = plt.subplots(4, 3, figsize=(FIG_BAR_W_PER_COL * 3, FIG_ROW_H * 4))
+    _bars_grid(axes, row_specs, PAPER_DOMAINS, row_ylims)
+    _states_words_legend(fig)
+    fig.tight_layout(rect=[0, 0.07, 1, 1.0])
+    _savepdf(fig, os.path.join(out_dir, 'A4-cross-patch-bars.pdf'))
+
+
+# ── appendix A5: effect gap trajectory (3×1) ─────────────────────────────────
+
+def save_appendix_A5_trajectory(base_stats, instruct_stats, out_dir):
+    """
+    Appendix A5: 3×1 effect gap trajectory for OLMo base + instruct.
+    One panel per paper domain (rows); panel title = domain name only.
+    OLMo base (blue solid) and instruct (orange dashed) plotted on the same x-axis.
+    Y-axis shared across all 3 panels.
+    """
+    A5_FS_TITLE  = FS_TITLE  + 4   # 14
+    A5_FS_LABEL  = FS_LABEL  + 3   # 12
+    A5_FS_TICK   = FS_TICK   + 3   # 11
+    A5_FS_LEGEND = FS_LEGEND + 4   # 11
+
+    letters = ['a', 'b', 'c']
+
+    domain_data = {}
+    for domain in PAPER_DOMAINS:
+        base_pts, instruct_pts = [], []
+        for e in base_stats:
+            s = e['domains'].get(domain)
+            if s:
+                base_pts.append((e['label'], s['effect_gap'], s['effect_gap'] < LOW_SIGNAL))
+        for e in instruct_stats:
+            s = e['domains'].get(domain)
+            if s:
+                instruct_pts.append((e['label'], s['effect_gap'], s['effect_gap'] < LOW_SIGNAL))
+        if base_pts or instruct_pts:
+            domain_data[domain] = (base_pts, instruct_pts)
+
+    if not domain_data:
+        print('  [A5] No data; skipping.')
+        return
+
+    all_gaps = [p[1] for bp, ip in domain_data.values() for p in bp + ip]
+    if not all_gaps:
+        return
+    margin = (max(all_gaps) - min(all_gaps)) * 0.12 or 0.005
+    y_min  = max(0.0, min(all_gaps) - margin)
+    y_max  = max(all_gaps) + margin
+
+    n_total = max(len(bp) + len(ip) for bp, ip in domain_data.values())
+    fig_w   = max(FIG_LINE_W_PER_PAN, n_total * 1.2)
+    fig, axes = plt.subplots(3, 1, figsize=(fig_w, (FIG_ROW_H + 0.5) * 3))
+
+    for ax, letter, domain in zip(axes, letters, PAPER_DOMAINS):
+        if domain not in domain_data:
+            ax.set_visible(False)
+            continue
+        base_pts, instruct_pts = domain_data[domain]
+        n_base   = len(base_pts)
+        all_pts  = base_pts + instruct_pts
+        xs       = np.arange(len(all_pts))
+        labels_x = [p[0] for p in all_pts]
+        gaps     = np.array([p[1] for p in all_pts], dtype=float)
+        low_sig  = [p[2] for p in all_pts]
+
+        ax.plot(xs[:n_base], gaps[:n_base], 'o-',
+                color=BASE_COLOR, label='Base (pre-training)',
+                linewidth=2, markersize=7, zorder=3)
+        if instruct_pts:
+            bridge_xs = [n_base - 1] + list(xs[n_base:])
+            bridge_ys = [gaps[n_base - 1]] + list(gaps[n_base:])
+            ax.plot(bridge_xs, bridge_ys, 's--',
+                    color=INSTRUCT_COLOR, label='Instruct fine-tuning',
+                    linewidth=2, markersize=7, zorder=3)
+            ax.axvline(n_base - 0.5, color='gray', linestyle='--',
+                       linewidth=1.2, alpha=0.6)
+
+        for xi, ls in enumerate(low_sig):
+            if ls:
+                ax.annotate('⚠', (xs[xi], gaps[xi]),
+                            textcoords='offset points', xytext=(0, 6),
+                            ha='center', fontsize=FS_LABEL, color=LOW_SIG_COLOR)
+
+        ax.set_xticks(xs)
+        ax.set_xticklabels(labels_x, rotation=30, ha='right', fontsize=A5_FS_TICK)
+        ax.set_xlabel('Training checkpoint', fontsize=A5_FS_LABEL)
+        ax.set_ylabel('Effect gap (high − low)', fontsize=A5_FS_LABEL)
+        ax.set_title(f'({letter}) {domain.capitalize()}', fontsize=A5_FS_TITLE)
+        ax.set_ylim(y_min, y_max)
+        ax.tick_params(axis='y', labelsize=A5_FS_TICK)
+        ax.grid(axis='y', alpha=0.25)
+        ax.axhline(0, color='black', linewidth=0.7, alpha=0.3)
+
+    handles, labels_leg = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels_leg, loc='lower center', bbox_to_anchor=(0.5, 0.0),
+               ncol=2, fontsize=A5_FS_LEGEND, frameon=True)
+    fig.tight_layout(rect=[0, 0.06, 1, 1.0])
+    _savepdf(fig, os.path.join(out_dir, 'A5-trajectory.pdf'))
+
+
+# ── appendix A6: NIE heatmap (layer × checkpoint) ────────────────────────────
+
+def save_appendix_A6_heatmap(base_stats, instruct_stats, out_dir, num_sample=None):
+    """
+    Appendix A6: 3×3 grid of NIE heatmaps.
+    Rows: states conditions (full restore, Attn-severed / MLP-only, MLP-severed / Attn-only).
+    Columns: domains (gender, race, profession).
+    X-axis: training checkpoints (base pre-training | instruct fine-tuning).
+    Y-axis: layer (0–15).
+    step_2000 is missing from instruct stats.json NIE arrays; loaded from local NFS.
+    Colorscale shared per row (same condition, all 3 domains).
+    """
+    A6_FS_TITLE  = FS_TITLE  + 3   # 13
+    A6_FS_LABEL  = FS_LABEL  + 4   # 13
+    A6_FS_TICK   = FS_TICK   + 3   # 11
+    A6_FS_CBAR   = FS_TICK   + 2   # 10
+
+    # (display label, stats.json key, load_within_model_from_local dict key)
+    # attn_nie in stats = _attn.npz = Attn-only restore = MLP-severed condition
+    # mlp_nie  in stats = _mlp.npz  = MLP-only restore  = Attn-severed condition
+    conditions = [
+        (STATES_LABELS[0], 'states_nie', 'bias_mean'),
+        (STATES_LABELS[1], 'mlp_nie',    'mlp_mean'),
+        (STATES_LABELS[2], 'attn_nie',   'attn_mean'),
+    ]
+
+    # Load step_2000 from local NFS (full result dict with mean_low + effect_gap).
+    # Other checkpoints are read from stats.json which stores raw ALP;
+    # both are normalized to NIE via (alp - mean_low) / effect_gap — same as A3.
+    step2000_local = {}
+    for domain in PAPER_DOMAINS:
+        res = load_within_model_from_local(
+            'OLMo-2-0425-1B-Instruct', 'allenai', 'step_2000', domain, num_sample)
+        if res is not None:
+            step2000_local[domain] = res
+
+    def _to_nie(alp_arr, mean_low, effect_gap):
+        """NIE = (alp - mean_low) / effect_gap  (same formula as A3 _nie helper)."""
+        if effect_gap <= 0:
+            return np.zeros_like(np.array(alp_arr, dtype=float))
+        return (np.array(alp_arr, dtype=float) - mean_low) / effect_gap
+
+    def _get_from_stats(stats_list, domain, key):
+        """Return [(label, nie_array)] normalizing stored raw ALP to NIE."""
+        out = []
+        for e in stats_list:
+            d = e['domains'].get(domain, {})
+            if key in d and 'mean_low' in d and 'effect_gap' in d:
+                nie = _to_nie(d[key], d['mean_low'], d['effect_gap'])
+                out.append((e['label'], nie))
+        return out
+
+    def _build_matrix(domain, stats_key, local_key):
+        """Build (matrix, labels_x, n_base) for one domain × condition."""
+        base_pts  = _get_from_stats(base_stats,    domain, stats_key)
+        inst_pts  = _get_from_stats(instruct_stats, domain, stats_key)
+
+        # Insert step_2000 in correct position (after step1400, before step2600).
+        # Skip insertion if step_2000 is already present (e.g. from NPZ loading).
+        inst_ordered = []
+        step2000_inserted = any(l == 'step2000' for l, _ in inst_pts)
+        for label, arr in inst_pts:
+            inst_ordered.append((label, arr))
+            if label == 'step1400' and not step2000_inserted:
+                if domain in step2000_local:
+                    r = step2000_local[domain]
+                    inst_ordered.append(('step2000', _to_nie(r[local_key], r['mean_low'], r['effect_gap'])))
+                step2000_inserted = True
+        if not step2000_inserted and domain in step2000_local:
+            r = step2000_local[domain]
+            inst_ordered.append(('step2000', _to_nie(r[local_key], r['mean_low'], r['effect_gap'])))
+
+        all_pts = base_pts + inst_ordered
+        if not all_pts:
+            return None, None, 0
+
+        labels_x = [p[0] for p in all_pts]
+        matrix   = np.stack([p[1] for p in all_pts], axis=1)  # (num_layer, n_checkpoints)
+        return matrix, labels_x, len(base_pts)
+
+    fig, axes = plt.subplots(3, 3, figsize=(15, 10))
+
+    for row_i, (cond_label, stats_key, local_key) in enumerate(conditions):
+        # Build matrices for all domains; collect for shared colorscale
+        row_data = {}
+        for domain in PAPER_DOMAINS:
+            matrix, labels_x, n_base_ckpts = _build_matrix(domain, stats_key, local_key)
+            if matrix is not None:
+                row_data[domain] = (matrix, labels_x, n_base_ckpts)
+
+        if not row_data:
+            for ax in axes[row_i]:
+                ax.set_visible(False)
+            continue
+
+        all_vals = np.concatenate([v[0].ravel() for v in row_data.values()])
+        abs_max  = np.nanmax(np.abs(all_vals))
+        vmin, vmax = -abs_max, abs_max
+
+        for col_i, domain in enumerate(PAPER_DOMAINS):
+            ax = axes[row_i, col_i]
+
+            if domain not in row_data:
+                ax.set_visible(False)
+                continue
+
+            matrix, labels_x, n_base_ckpts = row_data[domain]
+            num_layer = matrix.shape[0]
+
+            im = ax.imshow(
+                matrix, aspect='auto', origin='lower',
+                cmap='RdBu_r', vmin=vmin, vmax=vmax,
+                extent=[-0.5, matrix.shape[1] - 0.5, -0.5, num_layer - 0.5])
+
+            # Vertical separator between base pre-training and instruct fine-tuning
+            ax.axvline(n_base_ckpts - 0.5, color='black', linewidth=1.5,
+                       linestyle='--', alpha=0.7)
+
+            ax.set_xticks(np.arange(len(labels_x)))
+            ax.set_xticklabels(labels_x, rotation=45, ha='right', fontsize=A6_FS_TICK)
+            ax.set_yticks(np.arange(0, num_layer, 2))
+            ax.tick_params(axis='y', labelsize=A6_FS_TICK)
+
+            if row_i == 0:
+                ax.set_title(domain.capitalize(), fontsize=A6_FS_TITLE, fontweight='bold')
+
+            if col_i == 0:
+                ax.set_ylabel('Layer', fontsize=A6_FS_LABEL)
+                ax.annotate(cond_label, xy=(-0.28, 0.5), xycoords='axes fraction',
+                            rotation=90, ha='center', va='center',
+                            fontsize=A6_FS_LABEL, fontweight='bold')
+            else:
+                ax.set_ylabel('')
+
+            if row_i == len(conditions) - 1:
+                ax.set_xlabel('Checkpoint', fontsize=A6_FS_LABEL)
+
+            cb = plt.colorbar(im, ax=ax, shrink=0.85, pad=0.03)
+            cb.ax.tick_params(labelsize=A6_FS_CBAR)
+            if col_i == 2:
+                cb.set_label(Y_LABEL_NIE, fontsize=A6_FS_CBAR)
+            else:
+                cb.set_label('')
+
+    fig.tight_layout()
+    _savepdf(fig, os.path.join(out_dir, 'A6-heatmap.pdf'))
 
 
 # ── main loop ─────────────────────────────────────────────────────────────────
@@ -1101,7 +1993,7 @@ zip_names_all = zf.namelist()
 
 all_models_stats = {}  # accumulate for cross-model plots
 
-for model_name in models_to_run:
+for model_name in (models_to_run if RUN_BARS or RUN_DELTA or RUN_COMPARE else []):
     cfg = MODEL_CONFIGS[model_name]
     org = cfg['org']
 
@@ -1124,8 +2016,12 @@ for model_name in models_to_run:
             print(f'  {domain}')
 
             local_dir  = local_cases_dir(model_name, org, checkpoint, domain)
+            zip_prefix = zip_cases_prefix(org, model_name, checkpoint, domain)
+            zip_has_data = any(n.startswith(zip_prefix) and n.endswith('.npz')
+                               for n in zip_names_all)
             use_local  = (args.source == 'local') or \
-                         (args.source == 'auto' and os.path.isdir(local_dir))
+                         (args.source == 'auto' and os.path.isdir(local_dir)
+                          and not zip_has_data)
 
             if use_local:
                 all_local    = sorted(os.listdir(local_dir))
@@ -1300,21 +2196,125 @@ if RUN_CROSS_PATCH:
         print('\n  Only one direction has data — skipping comparison plots.')
 
     # 4-panel comparison: within-model last checkpoints + both cross-patch directions
+    # Base: OLMo-2-0425-1B main checkpoint (from main.zip)
+    # Instruct: OLMo-2-0425-1B-Instruct step_2000 main checkpoint (from local NFS)
     if all_direction_results:
-        print('\n  Loading within-model last checkpoints for 4-panel plots...')
-        S2_CKPT   = 'stage2-ingredient3-step23852-tokens51B'
-        INST_CKPT = 'step_2600'
+        print('\n  Loading within-model main checkpoints for 4-panel plots...')
         within_model_panels = {}
+        _main_zf4 = zipfile.ZipFile(MAIN_ZIP, 'r')
         for domain in domains_to_run:
             print(f'  {domain}')
-            s2_res   = load_within_model_from_zip(
-                zf, zip_names_all, BASE, 'allenai', S2_CKPT, domain, args.num_sample)
-            inst_res = load_within_model_from_zip(
-                zf, zip_names_all, INSTRUCT, 'allenai', INST_CKPT, domain, args.num_sample)
-            within_model_panels[domain] = {'s2_last': s2_res, 'inst_last': inst_res}
-        print('\n  Generating 4-panel plots...')
+            base_res = _load_from_main_zip(_main_zf4, domain, args.num_sample)
+            inst_res = load_within_model_from_local(
+                INSTRUCT, 'allenai', 'step_2000', domain, args.num_sample)
+            within_model_panels[domain] = {'s2_last': base_res, 'inst_last': inst_res}
+        _main_zf4.close()
+        print('\n  Generating 4-panel plots (main / step2000)...')
+        _main_body_out = os.path.join(PLOTS_BASE, 'main_body')
         save_cross_patch_4panel(within_model_panels, all_direction_results,
-                                domains_to_run, cross_patch_out)
+                                domains_to_run, cross_patch_out,
+                                inst_label='OLMo-2-0425-1B-Instruct\n(post)',
+                                file_prefix='4panel-step2000',
+                                extra_out_dir=_main_body_out)
+
+# ── NPZ-based checkpoint loader (bypasses stats.json) ────────────────────────
+
+def _load_checkpoints_from_npz(model_name, num_sample=None):
+    """
+    Build checkpoint stats list from NPZ files, bypassing stats.json entirely.
+    Returns a list in the same format as stats.json['checkpoints'].
+    Source priority: local NFS > main.zip (OLMo-2-0425-1B 'main') > results.zip.
+    """
+    cfg = MODEL_CONFIGS.get(model_name)
+    if cfg is None:
+        print(f'  [NPZ] Unknown model: {model_name}')
+        return None
+    org     = cfg['org']
+    entries = []
+    for ck_dir, label in cfg.get('checkpoints', []):
+        entry = {'label': label, 'checkpoint': ck_dir, 'domains': {}}
+        for domain in BIAS_TYPES:
+            res = load_within_model_from_local(model_name, org, ck_dir, domain, num_sample)
+            if res is None and model_name == 'OLMo-2-0425-1B' and ck_dir == 'main':
+                _mzf = zipfile.ZipFile(MAIN_ZIP, 'r')
+                res  = _load_from_main_zip(_mzf, domain, num_sample)
+                _mzf.close()
+            if res is None:
+                res = load_within_model_from_zip(
+                    zf, zip_names_all, model_name, org, ck_dir, domain, num_sample)
+            if res is None:
+                continue
+            entry['domains'][domain] = {
+                'states_nie':        res['bias_mean'].tolist(),
+                'pre_blank_nie':     res['pre_blank_mean'].tolist(),
+                'blank_nie':         res['blank_mean'].tolist(),
+                'mlp_nie':           res['mlp_mean'].tolist(),
+                'attn_nie':          res['attn_mean'].tolist(),
+                'mean_high':         float(res['mean_high']),
+                'mean_low':          float(res['mean_low']),
+                'effect_gap':        float(res['effect_gap']),
+                'n_cases':           res['n_cases'],
+                'num_layers':        res['num_layer'],
+                'peak_layer_states': int(np.argmax(res['bias_mean'])),
+                'peak_layer_mlp':    int(np.argmax(res['mlp_mean'])),
+                'peak_layer_attn':   int(np.argmax(res['attn_mean'])),
+            }
+        entries.append(entry)
+    n_loaded = sum(len(e['domains']) for e in entries)
+    print(f'  [NPZ] {model_name}: {n_loaded} domain entries across {len(entries)} checkpoints')
+    return entries
+
+
+# ── appendix figures ──────────────────────────────────────────────────────────
+if RUN_APPENDIX:
+    print('\n=== Appendix figures ===')
+    appendix_out = os.path.join(PLOTS_BASE, 'appendix')
+    os.makedirs(appendix_out, exist_ok=True)
+
+    _app_main_zf = zipfile.ZipFile(MAIN_ZIP, 'r')
+
+    print('\n  A1: OLMo base + instruct bar charts (4×3)...')
+    save_appendix_A1_olmo_bars(appendix_out, args.num_sample, main_zf=_app_main_zf)
+
+    print('\n  A2: Pythia bar charts (2×3)...')
+    save_appendix_A2_pythia_bars(appendix_out, args.num_sample)
+
+    print('\n  A3: NIE line plots (2×3)...')
+    save_appendix_A3_nie_lines(appendix_out, args.num_sample, main_zf=_app_main_zf)
+
+    print('\n  NIE overlay (main body, gender only)...')
+    main_body_out = os.path.join(PLOTS_BASE, 'main_body')
+    os.makedirs(main_body_out, exist_ok=True)
+    save_main_body_nie_overlay(main_body_out, args.num_sample, main_zf=_app_main_zf)
+
+    _app_main_zf.close()
+
+    print('\n  A4: Cross-patch bar charts (4×3)...')
+    _app_cp = {}
+    for _dk in ('pre_to_post', 'post_to_pre'):
+        _dr = {}
+        for _dom in PAPER_DOMAINS:
+            print(f'    {_dk} / {_dom}')
+            _res = load_cross_patch_domain(_dk, _dom, args.num_sample)
+            if _res is not None:
+                _dr[_dom] = _res
+        if _dr:
+            _app_cp[_dk] = _dr
+    save_appendix_A4_cross_patch_bars(_app_cp, appendix_out)
+
+    print('\n  A5: Trajectory plots (1×3)...')
+    _base_traj     = _load_checkpoints_from_npz('OLMo-2-0425-1B',          args.num_sample)
+    _instruct_traj = _load_checkpoints_from_npz('OLMo-2-0425-1B-Instruct', args.num_sample)
+    if _base_traj and _instruct_traj:
+        save_appendix_A5_trajectory(_base_traj, _instruct_traj, appendix_out)
+    else:
+        print('  [A5] Skipping.')
+
+    print('\n  A6: NIE heatmap — layer × checkpoint (3 conditions × 3 domains)...')
+    if _base_traj and _instruct_traj:
+        save_appendix_A6_heatmap(_base_traj, _instruct_traj, appendix_out, args.num_sample)
+    else:
+        print('  [A6] Skipping.')
 
 zf.close()
 print('\nDone.')
