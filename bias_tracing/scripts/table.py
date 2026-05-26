@@ -54,6 +54,7 @@ import sys
 import os
 import numpy as np
 from scipy.stats import pearsonr, wasserstein_distance
+from scipy.spatial.distance import jensenshannon
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -61,13 +62,12 @@ import zipfile
 from plot_utils import (
     MODEL_CONFIGS, local_cases_dir, CROSS_PATCH_BASE, CROSS_PATCH_CONFIGS,
     collect_scores, load_npz_local, load_npz_zip, partition_names,
-    zip_cases_prefix, ZIP_PATH,
+    zip_cases_prefix, ZIP_PATH, MAIN_ZIP,
 )
 
 DOMAINS = ['gender', 'profession', 'race']
 
 _zf      = zipfile.ZipFile(ZIP_PATH)
-MAIN_ZIP = '/deepfreeze/share/xuxin_transfer/bias_tracing/main.zip'
 _main_zf = zipfile.ZipFile(MAIN_ZIP)
 
 
@@ -128,6 +128,38 @@ for domain in DOMAINS:
 
     gap_b = mh_b - ml_b
     gap_i = mh_i - ml_i
+
+    if domain == 'gender':
+        print("\n=== Part 1 RAW gender values (before NIE) — abs log prob diff, micro-avg per layer ===")
+        print("Subject = bias_mean (blue 'single state' bar in the states plot).")
+        print("Target  = blank_mean (green 'attribute terms' bar in the words plot).")
+        print(f"mean_high (clean): base={mh_b:.6f}  instruct={mh_i:.6f}")
+        print(f"mean_low  (corr ): base={ml_b:.6f}  instruct={ml_i:.6f}")
+        print(f"effect_gap       : base={gap_b:.6f}  instruct={gap_i:.6f}")
+        print("\nBASE (main) SUBJECT:")
+        for l in range(16):
+            print(f"L{l}: {subj_b[l]}")
+        print("\nBASE (main) TARGET:")
+        for l in range(16):
+            print(f"L{l}: {tgt_b[l]}")
+        print("\nINSTRUCT (step_2000) SUBJECT:")
+        for l in range(16):
+            print(f"L{l}: {subj_i[l]}")
+        print("\nINSTRUCT (step_2000) TARGET:")
+        for l in range(16):
+            print(f"L{l}: {tgt_i[l]}")
+
+    # Compact per-domain subject-position L0 summary (ALP vs NIE, all domains)
+    nie_b_subj = (subj_b - ml_b) / gap_b   # (16,)
+    nie_i_subj = (subj_i - ml_i) / gap_i
+    print(f"\n--- {domain.upper()} subject-position summary ---")
+    print(f"effect_gap        : base={gap_b:.4f}  instruct={gap_i:.4f}")
+    print(f"ALP@L0 (subject)  : base={subj_b[0]:.4f}  instruct={subj_i[0]:.4f}   "
+          f"[max ALP: base L{int(subj_b.argmax())}={subj_b.max():.4f}, "
+          f"instruct L{int(subj_i.argmax())}={subj_i.max():.4f}]")
+    print(f"NIE@L0 (subject)  : base={nie_b_subj[0]:.4f}  instruct={nie_i_subj[0]:.4f}   "
+          f"[max NIE: base L{int(nie_b_subj.argmax())}={nie_b_subj.max():.4f}, "
+          f"instruct L{int(nie_i_subj.argmax())}={nie_i_subj.max():.4f}]")
 
     # NIE: normalize each model to its own effect gap
     nie_b = np.concatenate([(subj_b - ml_b) / gap_b, (tgt_b - ml_b) / gap_b])
@@ -225,25 +257,23 @@ def load_per_token_K(files, loader):
 def jsd_hist(a, b, n_bins=50):
     """
     Jensen-Shannon Divergence between two 1D empirical distributions.
-    Uses equal-width histogram over the union range of both arrays.
-    Returns JSD in bits (base-2 log), bounded [0, 1].
+    Uses an equal-width histogram over the union range of both arrays, then
+    scipy.spatial.distance.jensenshannon (base 2) on the bin counts.
+    scipy returns the JS *distance* (sqrt of the divergence), so we square it
+    to recover the JS divergence in bits, bounded [0, 1].
     Valid only when values are always >= 0 (Absolute Log Prob Diff satisfies this).
     """
-    lo = min(a.min(), b.min())
-    hi = max(a.max(), b.max())
-    if lo == hi:
-        return 0.0
-    bins = np.linspace(lo, hi, n_bins + 1)
-    pa, _ = np.histogram(a, bins=bins)
-    pb, _ = np.histogram(b, bins=bins)
-    # add small epsilon to avoid log(0)
-    pa = pa.astype(float) + 1e-10
-    pb = pb.astype(float) + 1e-10
-    pa /= pa.sum()
-    pb /= pb.sum()
-    m = 0.5 * (pa + pb)
-    kl = lambda p, q: np.sum(p * np.log2(p / q))
-    return 0.5 * kl(pa, m) + 0.5 * kl(pb, m)
+    # lo = min(a.min(), b.min())
+    # hi = max(a.max(), b.max())
+    # if lo == hi:
+        # return 0.0
+    # bins = np.linspace(lo, hi, n_bins + 1)
+    # pa, _ = np.histogram(a, bins=bins)
+    pa, _ = np.histogram(a)
+    pb, _ = np.histogram(b)
+    # jensenshannon normalizes the count vectors internally and handles zero
+    # bins via the 0*log0 = 0 convention; it returns the JS distance (sqrt).
+    return float(jensenshannon(pa, pb, base=2) ** 2)
 
 
 def k_distances(within_subj, within_tgt, cross_subj, cross_tgt):
@@ -258,6 +288,20 @@ def k_distances(within_subj, within_tgt, cross_subj, cross_tgt):
     jsd_subj = np.array([jsd_hist(within_subj[:, l], cross_subj[:, l]) for l in range(16)])
     jsd_tgt  = np.array([jsd_hist(within_tgt[:,  l], cross_tgt[:,  l]) for l in range(16)])
     return w1_subj, w1_tgt, jsd_subj, jsd_tgt
+
+
+def profile_distances(within_mean, cross_mean):
+    """
+    Snippet version: W1 and JSD computed directly on the per-layer mean
+    profiles (the plotted bars).
+        W1  = wasserstein_distance(within_mean, cross_mean)
+        JSD = jensenshannon(within_mean, cross_mean, base=2) ** 2
+    within_mean, cross_mean : 1-D arrays of per-layer means.
+    Returns (w1, jsd) scalars.
+    """
+    w1  = float(wasserstein_distance(within_mean, cross_mean))
+    jsd = float(jensenshannon(within_mean, cross_mean, base=2) ** 2)
+    return w1, jsd
 
 
 # Cross-patch directions and their within-model reference (target model)
@@ -287,8 +331,7 @@ print('=' * 70)
 print('Part 2 — Cross-patch distributional distance')
 print('Token scores are pooled at token-level (micro). The subject per-layer')
 print('means match the 4-panel states plot bars (bias_mean) exactly.')
-print('Subject and target positions are reported separately, plus the combined')
-print('mean over all 32 positions (16 subject + 16 target layers).')
+print('Subject and target positions are reported separately (no combined row).')
 print('Metric 1: Wasserstein-1 (W1) — mean shift between distributions')
 print('          units = Absolute Log Prob Diff (same scale as raw scores)')
 print('Metric 2: JSD — Jensen-Shannon Divergence via histogram (bits, [0,1])')
@@ -366,17 +409,28 @@ for dir_key, cfg in DIRECTIONS.items():
 
         w1_subj, w1_tgt, jsd_subj, jsd_tgt = k_distances(w_subj, w_tgt, c_subj, c_tgt)
 
+        # Snippet version: metrics on the per-layer mean profiles (plotted bars).
+        w_subj_prof = w_subj.mean(axis=0)   # (16,) = plotted bars
+        c_subj_prof = c_subj.mean(axis=0)
+        w_tgt_prof  = w_tgt.mean(axis=0)
+        c_tgt_prof  = c_tgt.mean(axis=0)
+        snip_w1_subj, snip_jsd_subj = profile_distances(w_subj_prof, c_subj_prof)
+        snip_w1_tgt,  snip_jsd_tgt  = profile_distances(w_tgt_prof,  c_tgt_prof)
+
         dir_results[domain] = {
             'w1_subj':  w1_subj,   # (16,)
             'w1_tgt':   w1_tgt,    # (16,)
             'jsd_subj': jsd_subj,  # (16,)
             'jsd_tgt':  jsd_tgt,   # (16,)
-            'w1_mean':  np.mean(np.concatenate([w1_subj, w1_tgt])),
-            'jsd_mean': np.mean(np.concatenate([jsd_subj, jsd_tgt])),
             'w1_subj_mean':  w1_subj.mean(),
             'w1_tgt_mean':   w1_tgt.mean(),
             'jsd_subj_mean': jsd_subj.mean(),
             'jsd_tgt_mean':  jsd_tgt.mean(),
+            # Snippet version (per-layer mean profiles)
+            'snip_w1_subj':  snip_w1_subj,
+            'snip_jsd_subj': snip_jsd_subj,
+            'snip_w1_tgt':   snip_w1_tgt,
+            'snip_jsd_tgt':  snip_jsd_tgt,
             'n_within': len(w_subj),
             'n_cross':  len(c_subj),
         }
@@ -408,12 +462,14 @@ for dir_key, cfg in DIRECTIONS.items():
         vals = [dir_results.get(d, {}).get(key, float('nan')) for d in DOMAINS]
         print(f"  {label:<42} {vals[0]:>8.4f} {vals[1]:>12.4f} {vals[2]:>8.4f}")
 
-    comb_rows = [
-        ('w1_mean',  'W1 — all positions (32 layers: subject+target)'),
-        ('jsd_mean', 'JSD — all positions (32 layers: subject+target)'),
+    snip_rows = [
+        ('snip_w1_subj',  'W1  — subject profile (16 means)'),
+        ('snip_jsd_subj', 'JSD — subject profile (16 means)'),
+        ('snip_w1_tgt',   'W1  — target profile (16 means)'),
+        ('snip_jsd_tgt',  'JSD — target profile (16 means)'),
     ]
-    print('\n  [Combined: subject + target]')
-    for key, label in comb_rows:
+    print('\n  [Snippet version: metric on per-layer mean profiles (plot bars)]')
+    for key, label in snip_rows:
         vals = [dir_results.get(d, {}).get(key, float('nan')) for d in DOMAINS]
         print(f"  {label:<42} {vals[0]:>8.4f} {vals[1]:>12.4f} {vals[2]:>8.4f}")
 

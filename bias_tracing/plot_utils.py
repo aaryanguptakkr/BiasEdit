@@ -15,12 +15,20 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
+try:
+    from private_names import name1, name2, name3, name4
+except ImportError as _e:  # pragma: no cover
+    raise ImportError(
+        "Missing private_names.py (gitignored). Create it next to plot_utils.py "
+        "defining name1..name4 — see private_names.py for the expected fields."
+    ) from _e
+
 # ── paths ─────────────────────────────────────────────────────────────────────
 
-ZIP_PATH   = '/deepfreeze/share/xuxin_transfer/bias_tracing/results.zip'
-MAIN_ZIP   = '/deepfreeze/share/xuxin_transfer/bias_tracing/main.zip'
-LOCAL_BASE = '/deepfreeze/aag026/Aaryan2/BiasEdit/bias_tracing/results'
-PLOTS_BASE = '/deepfreeze/aag026/Aaryan2/BiasEdit/bias_tracing/plots'
+ZIP_PATH   = f'/deepfreeze/share/{name3}/bias_tracing/results.zip'
+MAIN_ZIP   = f'/deepfreeze/share/{name3}/bias_tracing/main.zip'
+LOCAL_BASE = f'/deepfreeze/{name1}/{name2}/BiasEdit/bias_tracing/results'
+PLOTS_BASE = f'/deepfreeze/{name1}/{name2}/BiasEdit/bias_tracing/plots'
 
 # ── model references ──────────────────────────────────────────────────────────
 
@@ -80,7 +88,7 @@ MODEL_CONFIGS = {
 # The .npz format is identical to within-model causal tracing, so the same
 # collect_scores / _draw_bars pipeline applies.
 
-CROSS_PATCH_BASE = '/deepfreeze/share/omar_transfer/results/cross_patch'
+CROSS_PATCH_BASE = f'/deepfreeze/share/{name4}/results/cross_patch'
 
 CROSS_PATCH_CONFIGS = {
     'pre_to_post': {
@@ -139,9 +147,9 @@ STATES_LABELS = [
     'Effect with MLP severed',
 ]
 WORDS_LABELS = [
-    'Effect of bias attribute words',
-    'Effect of the token before attribute terms',
-    'Effect of attribute terms',
+    'Effect of subject token',     # bias_mean       — subject (bias attribute) token positions
+    'Effect of pre-target token',  # pre_blank_mean  — token before the prediction target
+    'Effect of target token',      # blank_mean      — prediction target token positions
 ]
 
 # Standardized bar colors: blue (full restore), red (Attn severed / MLP-only), green (MLP severed / Attn-only)
@@ -174,6 +182,36 @@ def partition_names(names):
         elif n.endswith('.npz'):
             single.append(n)
     return single, attn, mlp
+
+
+def _case_stem(name):
+    """Case id shared by a case's full/attn/mlp files.
+    'knowledge_7.npz' / 'knowledge_7_attn.npz' / 'knowledge_7_mlp.npz' → 'knowledge_7'."""
+    s = name[:-4] if name.endswith('.npz') else name
+    for suf in ('_attn', '_mlp', '_intermediate'):
+        if s.endswith(suf):
+            return s[:-len(suf)]
+    return s
+
+
+def subsample_aligned(single, attn, mlp, num_sample):
+    """Subsample the three restore-type file lists so they cover the SAME cases.
+
+    Slicing single/attn/mlp independently with [:num_sample] can pick mismatched
+    case subsets (the lists are sorted lexicographically and a case may be missing
+    one of its three files), which would average the three bars over different
+    cases. This takes the first num_sample full-restore cases, then keeps only the
+    attn/mlp files belonging to those same cases.
+
+    num_sample=None → return all three unchanged (the all-data path).
+    """
+    if num_sample is None:
+        return single, attn, mlp
+    chosen = single[:num_sample]
+    keep   = {_case_stem(s) for s in chosen}
+    return (chosen,
+            [a for a in attn if _case_stem(a) in keep],
+            [m for m in mlp  if _case_stem(m) in keep])
 
 
 def load_npz_local(path):

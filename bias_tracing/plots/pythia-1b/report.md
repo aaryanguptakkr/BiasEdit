@@ -1,7 +1,6 @@
 # pythia-1b — Bias Tracing Report
 
 Generated: 2026-05-23  
-Source: `/deepfreeze/share/xuxin_transfer/bias_tracing/results.zip`
 
 ## What this report measures
 

@@ -259,7 +259,7 @@ identical to within-model tracing, so no new data-loading code was needed.
 
 **Data location (local NFS, not in the zip):**
 ```
-/deepfreeze/share/omar_transfer/results/cross_patch/
+<cross-patch results dir>/
     olmo_1b_pre_to_post/    ← base activations patched into instruct model
     olmo_1b_post_to_pre/    ← instruct activations patched into base model
 ```

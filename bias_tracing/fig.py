@@ -53,7 +53,6 @@ Use --direction to run only one direction.
 """
 
 import os
-import io
 import json
 import zipfile
 import argparse
@@ -67,7 +66,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from plot_utils import (
-    ZIP_PATH, MAIN_ZIP, LOCAL_BASE, PLOTS_BASE,
+    ZIP_PATH, MAIN_ZIP, PLOTS_BASE,
     MODEL_CONFIGS, BIAS_TYPES, PAPER_DOMAINS,
     CROSS_PATCH_BASE, CROSS_PATCH_CONFIGS,
     STATES_LABELS, WORDS_LABELS, BAR_COLORS, STATES_COLORS, WORDS_COLORS,
@@ -76,14 +75,14 @@ from plot_utils import (
     FIG_BAR_W_SINGLE, FIG_BAR_H_SINGLE, FIG_BAR_W_PER_COL,
     FIG_GRID_W_PER_COL, FIG_ROW_H, FIG_LINE_W_PER_PAN, FIG_TRAJ_H,
     BASE_COLOR, INSTRUCT_COLOR, LOW_SIG_COLOR, LOW_SIG_BG,
-    local_cases_dir, zip_cases_prefix, partition_names,
+    local_cases_dir, zip_cases_prefix, partition_names, subsample_aligned,
     load_npz_local, load_npz_zip,
     collect_scores, _draw_bars, _savepdf,
 )
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
-PLOT_CHOICES = ['bars', 'delta', 'compare', 'cross_patch', 'appendix']
+PLOT_CHOICES = ['bars', 'delta', 'compare', 'cross_patch', 'appendix', 'cp_nie']
 
 parser = argparse.ArgumentParser(
     formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -129,6 +128,7 @@ RUN_DELTA       = 'delta'       in _plots
 RUN_COMPARE     = 'compare'     in _plots
 RUN_CROSS_PATCH = 'cross_patch' in _plots
 RUN_APPENDIX    = 'appendix'    in _plots
+RUN_CP_NIE      = 'cp_nie'      in _plots
 
 models_to_run      = [args.model]     if args.model     else list(MODEL_CONFIGS.keys())
 domains_to_run     = [args.bias]      if args.bias       else BIAS_TYPES
@@ -237,7 +237,6 @@ def save_stats_and_report(model_name, all_ckpt_stats, out_dir):
         f'# {model_name} — Bias Tracing Report',
         f'',
         f'Generated: {today}  ',
-        f'Source: `{ZIP_PATH}`',
         f'',
         f'## What this report measures',
         f'',
@@ -382,32 +381,6 @@ def save_stats_and_report(model_name, all_ckpt_stats, out_dir):
 
 DOMAIN_COLORS = {'gender': '#2196F3', 'profession': '#4CAF50',
                  'race': '#FF5722', 'religion': '#9C27B0'}
-
-def _extract_series(ckpt_stats_list):
-    """
-    From a model's all_ckpt_stats, extract per-domain series:
-      labels, gap, nie_l0_states, nie_l0_mlp, nie_l0_attn
-    NIE-L0 = (score_at_layer0 - low) / gap for each restore condition.
-    """
-    out = {d: {'labels': [], 'gap': [],
-               'nie_l0_states': [], 'nie_l0_mlp': [], 'nie_l0_attn': []}
-           for d in BIAS_TYPES}
-    for e in ckpt_stats_list:
-        for d in BIAS_TYPES:
-            s = e['domains'].get(d)
-            out[d]['labels'].append(e['label'])
-            if s and s['effect_gap'] > 0:
-                gap = s['effect_gap']
-                low = s['mean_low']
-                out[d]['gap'].append(gap)
-                out[d]['nie_l0_states'].append((s['states_nie'][0] - low) / gap)
-                out[d]['nie_l0_mlp'].append(  (s['mlp_nie'][0]    - low) / gap)
-                out[d]['nie_l0_attn'].append(  (s['attn_nie'][0]   - low) / gap)
-            else:
-                for k in ('gap', 'nie_l0_states', 'nie_l0_mlp', 'nie_l0_attn'):
-                    out[d][k].append(float('nan'))
-    return out
-
 
 def save_bias_delta(ckpt_stats_list, model_name, out_dir):
     """
@@ -716,10 +689,11 @@ def load_cross_patch_domain(direction_key, domain, num_sample=None):
 
     all_files = sorted(os.listdir(cases_dir))
     single_b, attn_b, mlp_b = partition_names(all_files)
+    single_b, attn_b, mlp_b = subsample_aligned(single_b, attn_b, mlp_b, num_sample)
 
-    single_items = [os.path.join(cases_dir, b) for b in single_b[:num_sample]]
-    attn_items   = [os.path.join(cases_dir, b) for b in attn_b[:num_sample]]
-    mlp_items    = [os.path.join(cases_dir, b) for b in mlp_b[:num_sample]]
+    single_items = [os.path.join(cases_dir, b) for b in single_b]
+    attn_items   = [os.path.join(cases_dir, b) for b in attn_b]
+    mlp_items    = [os.path.join(cases_dir, b) for b in mlp_b]
 
     print(f'    single={len(single_items)}, attn={len(attn_items)}, mlp={len(mlp_items)}')
 
@@ -938,10 +912,11 @@ def load_within_model_from_zip(zf, zip_names_all, model_name, org, checkpoint, d
 
     basenames    = [os.path.basename(n) for n in all_names]
     single_b, attn_b, mlp_b = partition_names(basenames)
+    single_b, attn_b, mlp_b = subsample_aligned(single_b, attn_b, mlp_b, num_sample)
     name_map     = {os.path.basename(n): n for n in all_names}
-    single_items = [name_map[b] for b in single_b[:num_sample] if b in name_map]
-    attn_items   = [name_map[b] for b in attn_b[:num_sample]   if b in name_map]
-    mlp_items    = [name_map[b] for b in mlp_b[:num_sample]    if b in name_map]
+    single_items = [name_map[b] for b in single_b if b in name_map]
+    attn_items   = [name_map[b] for b in attn_b   if b in name_map]
+    mlp_items    = [name_map[b] for b in mlp_b    if b in name_map]
     loader       = lambda p: load_npz_zip(zf, p)
 
     print(f'    single={len(single_items)}, attn={len(attn_items)}, mlp={len(mlp_items)}')
@@ -997,9 +972,10 @@ def load_within_model_from_local(model_name, org, checkpoint, domain, num_sample
 
     all_local    = sorted(os.listdir(cases_dir))
     single_b, attn_b, mlp_b = partition_names(all_local)
-    single_items = [os.path.join(cases_dir, b) for b in single_b[:num_sample]]
-    attn_items   = [os.path.join(cases_dir, b) for b in attn_b[:num_sample]]
-    mlp_items    = [os.path.join(cases_dir, b) for b in mlp_b[:num_sample]]
+    single_b, attn_b, mlp_b = subsample_aligned(single_b, attn_b, mlp_b, num_sample)
+    single_items = [os.path.join(cases_dir, b) for b in single_b]
+    attn_items   = [os.path.join(cases_dir, b) for b in attn_b]
+    mlp_items    = [os.path.join(cases_dir, b) for b in mlp_b]
     loader       = load_npz_local
 
     print(f'    single={len(single_items)}, attn={len(attn_items)}, mlp={len(mlp_items)}')
@@ -1055,7 +1031,7 @@ def save_cross_patch_4panel(within_model_panels, all_direction_results, domains,
 
     Y-axis is fixed across all 4 panels so they are directly comparable.
 
-    within_model_panels  : {domain: {'s2_last': result_dict, 'inst_last': result_dict}}
+    within_model_panels  : {domain: {'base_last': result_dict, 'inst_last': result_dict}}
     all_direction_results: {direction_key: {domain: result_dict}}
     domains              : ordered list of domains to include
     out_dir              : plots/cross_patch/
@@ -1069,7 +1045,7 @@ def save_cross_patch_4panel(within_model_panels, all_direction_results, domains,
       {file_prefix}-composite-words.pdf
     """
     PANEL_DEFS = [
-        ('s2_last',    'OLMo-2-0425-1B\n(pre)',  'within'),
+        ('base_last',    'OLMo-2-0425-1B\n(pre)',  'within'),
         ('inst_last',  inst_label,               'within'),
         ('pre_to_post', 'Pre → Post',             'cross'),
         ('post_to_pre', 'Post → Pre',             'cross'),
@@ -1154,20 +1130,23 @@ def save_cross_patch_4panel(within_model_panels, all_direction_results, domains,
             _savepdf(fig, out_path)
 
         def _draw_2panel(defs_subset, data_subset, suptitle, out_path):
+            # Matches the 4-panel styling exactly (letter-prefixed titles, ylabel
+            # only on the left panel, shared bottom legend, no suptitle); each
+            # 2-panel figure carries its own legend.
             y_min, y_max = _shared_ylim(data_subset, plot_type)
             if y_min is None:
                 return
-            fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-            fig.suptitle(suptitle, fontsize=FS_SUPTITLE, fontweight='bold')
+            fig, axes = plt.subplots(1, 2, figsize=(8, 4))
             for i, (ax, (key, label, src), res) in enumerate(
                     zip(axes, defs_subset, data_subset)):
-                _fill_ax(ax, res, plot_type, labels_list, label, y_min, y_max)
+                _fill_ax(ax, res, plot_type, labels_list,
+                         f'({"ab"[i]}) {label}', y_min, y_max,
+                         show_ylabel=(i == 0))
                 leg = ax.get_legend()
                 if leg:
                     leg.remove()
-                _label_ax(ax, 'AB'[i])
             _shared_legend(fig)
-            fig.tight_layout(rect=[0, 0.12, 1, 0.92])
+            fig.tight_layout(rect=[0, 0.10, 1, 1.0])
             _savepdf(fig, out_path)
 
         # ── per-domain figures ────────────────────────────────────────────────
@@ -1184,7 +1163,7 @@ def save_cross_patch_4panel(within_model_panels, all_direction_results, domains,
                 os.path.join(out_dir, _fname),
                 extra_path=os.path.join(extra_out_dir, _fname) if extra_out_dir else None)
 
-            # Layout 2: within-model — Stage 2 (s2-51B) vs Instruct (step2000)
+            # Layout 2: within-model — Base (main) vs Instruct (step2000)
             _draw_2panel(
                 PANEL_DEFS[:2], panels_data[:2],
                 f'{dom} bias — within-model: Stage 2 vs Instruct ({plot_type})\n'
@@ -1238,10 +1217,11 @@ def _load_from_main_zip(main_zf, domain, num_sample=None):
         return None
     basenames    = [os.path.basename(n) for n in names]
     single_b, attn_b, mlp_b = partition_names(basenames)
+    single_b, attn_b, mlp_b = subsample_aligned(single_b, attn_b, mlp_b, num_sample)
     name_map     = {os.path.basename(n): n for n in names}
-    single_items = [name_map[b] for b in single_b[:num_sample] if b in name_map]
-    attn_items   = [name_map[b] for b in attn_b[:num_sample]   if b in name_map]
-    mlp_items    = [name_map[b] for b in mlp_b[:num_sample]    if b in name_map]
+    single_items = [name_map[b] for b in single_b if b in name_map]
+    attn_items   = [name_map[b] for b in attn_b   if b in name_map]
+    mlp_items    = [name_map[b] for b in mlp_b    if b in name_map]
     loader       = lambda p: load_npz_zip(main_zf, p)
     print(f'    [main.zip] {domain}: single={len(single_items)}, attn={len(attn_items)}, mlp={len(mlp_items)}')
     if not single_items:
@@ -1484,9 +1464,9 @@ def save_appendix_A3_nie_lines(out_dir, num_sample=None, main_zf=None):
     STATES_LABELS_SHORT = ['States', 'Attn severed', 'MLP severed']
     WORDS_KEYS    = ('bias', 'pre_blank', 'blank')
     WORDS_LABELS_SHORT  = [
-        'Bias attribute words',
-        'Token before attribute',
-        'Attribute terms',
+        'Effect of subject token',
+        'Effect of pre-target token',
+        'Effect of target token',
     ]
 
     def _nie(res, key):
@@ -1705,6 +1685,303 @@ def save_main_body_nie_overlay(out_dir, num_sample=None, main_zf=None):
                labelspacing=0.4, handlelength=1.8, handletextpad=0.4, columnspacing=0.8)
     fig.tight_layout(rect=[0, 0.17, 1, 1.0])
     _savepdf(fig, os.path.join(out_dir, 'nie-overlay-gender.pdf'))
+
+
+def save_main_body_pre_post_crosspatch(out_dir, num_sample=None, main_zf=None):
+    """
+    Main-body 2-panel gender figure (1×2, shared y-axis, no suptitle).
+
+      (a) Reference — within-model NIE overlay, 3 restore conditions:
+          OLMo-2-0425-1B (Pre, solid) vs OLMo-2-0425-1B-Instruct (Post, dashed).
+      (b) States NIE only, four solid lines in distinct colors:
+          Pre      = within-model base   (main)
+          Post     = within-model instruct (step_2000)
+          Pre→Post = cross-patch, Pre activations → Post model
+          Post→Pre = cross-patch, Post activations → Pre model
+
+    Every curve is NIE = (score − low) / (high − low), normalized to its own
+    recipient's clean−corrupted gap (the cross-patch runs store the recipient's
+    baselines), so all lines are directly comparable. Font sizes match
+    nie-overlay-gender.pdf. Saved to out_dir/pre-post-crosspatch-gender.pdf
+    """
+    from matplotlib.lines import Line2D
+
+    FS_T = FS_TITLE + 3   # 13
+    FS_L = FS_LABEL + 5   # 14
+    FS_K = FS_TICK  + 4   # 12
+    FS_G = FS_LEGEND + 5  # 12
+
+    DOMAIN = 'gender'
+
+    print('  [pre-post-cp] Loading Pre (base, main.zip)...')
+    _own_zf = main_zf is None
+    if _own_zf:
+        main_zf = zipfile.ZipFile(MAIN_ZIP, 'r')
+    pre_res = _load_from_main_zip(main_zf, DOMAIN, num_sample)
+    if _own_zf:
+        main_zf.close()
+
+    print('  [pre-post-cp] Loading Post (instruct step_2000) + cross-patch...')
+    post_res   = load_within_model_from_local(
+        'OLMo-2-0425-1B-Instruct', 'allenai', 'step_2000', DOMAIN, num_sample)
+    p2post_res = load_cross_patch_domain('pre_to_post', DOMAIN, num_sample)
+    p2pre_res  = load_cross_patch_domain('post_to_pre', DOMAIN, num_sample)
+
+    def _nie(res, key):
+        key_map = {'bias': 'bias_mean', 'mlp': 'mlp_mean', 'attn': 'attn_mean'}
+        if res is None or res['effect_gap'] <= 0:
+            return None
+        arr = np.array(res[key_map[key]])
+        return (arr - res['mean_low']) / res['effect_gap']
+
+    # (a) within-model overlay: 3 conditions, Pre solid / Post dashed
+    COND_KEYS   = ('bias', 'mlp', 'attn')
+    COND_LABELS = ['States', 'Attn severed', 'MLP severed']
+
+    # (b) States-only, four distinct colors
+    B_SERIES = [
+        ('Pre',      pre_res,    BASE_COLOR,     'o'),
+        ('Post',     post_res,   INSTRUCT_COLOR, 's'),
+        ('Pre→Post', p2post_res, '#2E7D32',      '^'),
+        ('Post→Pre', p2pre_res,  '#6A1B9A',      'D'),
+    ]
+
+    # shared y-range across both panels
+    all_vals = []
+    for key in COND_KEYS:
+        for res in (pre_res, post_res):
+            v = _nie(res, key)
+            if v is not None:
+                all_vals.extend(v.tolist())
+    for _, res, _, _ in B_SERIES:
+        v = _nie(res, 'bias')
+        if v is not None:
+            all_vals.extend(v.tolist())
+    if not all_vals:
+        print('  [pre-post-cp] No data; skipping.')
+        return
+    margin = (max(all_vals) - min(all_vals)) * 0.12 or 0.05
+    y_min, y_max = min(all_vals) - margin, max(all_vals) + margin
+
+    fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(13.0, FIG_ROW_H + 1.0), sharey=True)
+
+    # ── panel (a) ──────────────────────────────────────────────────────────────
+    for ki, key in enumerate(COND_KEYS):
+        color = BAR_COLORS[ki]
+        nie_pre  = _nie(pre_res, key)
+        nie_post = _nie(post_res, key)
+        if nie_pre is not None:
+            ax_a.plot(np.arange(len(nie_pre)), nie_pre, color=color, linewidth=2.0,
+                      linestyle='-', marker='o', markersize=3)
+        if nie_post is not None:
+            ax_a.plot(np.arange(len(nie_post)), nie_post, color=color, linewidth=2.0,
+                      linestyle='--', marker='s', markersize=3)
+    ax_a.axhline(0, color='black', linewidth=0.7, alpha=0.4)
+    ax_a.set_title('(a) Gender — OLMo-2-0425-1B (Pre) solid vs\n'
+                   'OLMo-2-0425-1B-Instruct (Post) dashed', fontsize=FS_T)
+    ax_a.set_xlabel('Layer', fontsize=FS_L)
+    ax_a.set_xticks(np.arange(0, 16, 2))
+    ax_a.tick_params(labelsize=FS_K)
+    ax_a.grid(alpha=0.2)
+    handles_a = []
+    for ki, cond in enumerate(COND_LABELS):
+        c = BAR_COLORS[ki]
+        handles_a.append(Line2D([0], [0], color=c, linewidth=2, linestyle='-',
+                                marker='o', markersize=4, label=f'{cond} — Pre (solid)'))
+        handles_a.append(Line2D([0], [0], color=c, linewidth=2, linestyle='--',
+                                marker='s', markersize=4, label=f'{cond} — Post (dashed)'))
+    ax_a.legend(handles=handles_a, fontsize=FS_G, frameon=True, ncol=2,
+                loc='upper center', bbox_to_anchor=(0.5, -0.22),
+                labelspacing=0.3, handlelength=2.0, columnspacing=1.2)
+
+    # ── panel (b) ──────────────────────────────────────────────────────────────
+    handles_b = []
+    for name, res, color, mk in B_SERIES:
+        nie = _nie(res, 'bias')
+        if nie is not None:
+            ax_b.plot(np.arange(len(nie)), nie, color=color, linewidth=2.0,
+                      linestyle='-', marker=mk, markersize=4)
+        handles_b.append(Line2D([0], [0], color=color, linewidth=2, linestyle='-',
+                                marker=mk, markersize=5, label=f'States — {name}'))
+    ax_b.axhline(0, color='black', linewidth=0.7, alpha=0.4)
+    ax_b.set_title('(b) Gender — Pre, Post, Pre→Post, Post→Pre\n(States NIE)',
+                   fontsize=FS_T)
+    ax_b.set_xlabel('Layer', fontsize=FS_L)
+    ax_b.set_xticks(np.arange(0, 16, 2))
+    ax_b.tick_params(labelsize=FS_K, labelleft=True)   # keep y-ticks despite sharey
+    ax_b.grid(alpha=0.2)
+    ax_b.legend(handles=handles_b, fontsize=FS_G, frameon=True, ncol=2,
+                loc='upper center', bbox_to_anchor=(0.5, -0.22),
+                labelspacing=0.3, handlelength=2.0, columnspacing=1.2)
+
+    ax_a.set_ylim(y_min, y_max)
+    fig.supylabel(Y_LABEL_NIE, fontsize=FS_L)
+    fig.tight_layout()
+    fig.subplots_adjust(wspace=0.1)   # tighten gap between the two panels
+    _savepdf(fig, os.path.join(out_dir, 'pre-post-crosspatch-gender.pdf'))
+
+
+# ── appendix A7: cross-patch NIE overlay (within-model vs cross-patch) ────────
+
+def save_crosspatch_nie_overlay(out_dir, num_sample=None, main_zf=None):
+    """
+    4×3 NIE layer-profile overlay for cross-model patching.
+    Solid = within-model recipient; dashed = cross-patch into that recipient.
+    Both curves are normalized by the recipient's own clean−corrupted gap
+    (the cross-patch run stores the recipient's high/low baselines — the donor
+    only sets the restoration value), so they are directly comparable.
+
+      Row 0: Pre→Post — Post within-model (solid) vs Pre→Post cross-patch (dashed) — states
+      Row 1: Pre→Post — same pair — words
+      Row 2: Post→Pre — Pre  within-model (solid) vs Post→Pre cross-patch (dashed) — states
+      Row 3: Post→Pre — same pair — words
+
+    Columns = gender, race, profession. States rows share one Y-range; words
+    rows share another. Saved to out_dir/A7-crosspatch-nie-overlay.pdf
+    """
+    from matplotlib.lines import Line2D
+
+    A7_FS_TITLE  = FS_TITLE + 1
+    A7_FS_LABEL  = FS_LABEL + 5
+    A7_FS_TICK   = FS_TICK + 4
+    A7_FS_LEGEND = FS_LEGEND + 6
+
+    print('  [A7] Loading OLMo base (pre) from main.zip...')
+    _own_zf = main_zf is None
+    if _own_zf:
+        main_zf = zipfile.ZipFile(MAIN_ZIP, 'r')
+    pre_results = {d: _load_from_main_zip(main_zf, d, num_sample) for d in PAPER_DOMAINS}
+    if _own_zf:
+        main_zf.close()
+
+    print('  [A7] Loading OLMo instruct (post, step_2000) from local...')
+    post_results = {d: load_within_model_from_local(
+        'OLMo-2-0425-1B-Instruct', 'allenai', 'step_2000', d, num_sample)
+        for d in PAPER_DOMAINS}
+
+    print('  [A7] Loading cross-patch directions (pre→post, post→pre)...')
+    p2post_results = {d: load_cross_patch_domain('pre_to_post', d, num_sample) for d in PAPER_DOMAINS}
+    p2pre_results  = {d: load_cross_patch_domain('post_to_pre', d, num_sample) for d in PAPER_DOMAINS}
+
+    STATES_KEYS = ('bias', 'mlp', 'attn')
+    STATES_LABELS_SHORT = ['States', 'Attn severed', 'MLP severed']
+    WORDS_KEYS  = ('bias', 'pre_blank', 'blank')
+    WORDS_LABELS_SHORT  = ['Effect of subject token', 'Effect of pre-target token', 'Effect of target token']
+
+    def _nie(res, key):
+        key_map = {'bias': 'bias_mean', 'mlp': 'mlp_mean', 'attn': 'attn_mean',
+                   'pre_blank': 'pre_blank_mean', 'blank': 'blank_mean'}
+        if res is None or res['effect_gap'] <= 0:
+            return None
+        arr = res.get(key_map[key])
+        if arr is None:
+            return None
+        arr = np.array(arr) if not isinstance(arr, np.ndarray) else arr
+        return (arr - res['mean_low']) / res['effect_gap']
+
+    states_vals, words_vals = [], []
+    for results_dict in (pre_results, post_results, p2post_results, p2pre_results):
+        for d in PAPER_DOMAINS:
+            res = results_dict.get(d)
+            for k in STATES_KEYS:
+                v = _nie(res, k)
+                if v is not None:
+                    states_vals.extend(v.tolist())
+            for k in WORDS_KEYS:
+                v = _nie(res, k)
+                if v is not None:
+                    words_vals.extend(v.tolist())
+
+    if not states_vals and not words_vals:
+        print('  [A7] No valid NIE data; skipping.')
+        return
+
+    def _yrange(vals):
+        if not vals:
+            return -0.1, 1.1
+        m = (max(vals) - min(vals)) * 0.12 or 0.05
+        return min(vals) - m, max(vals) + m
+
+    states_ymin, states_ymax = _yrange(states_vals)
+    words_ymin,  words_ymax  = _yrange(words_vals)
+
+    # rows: (plot_type, within_results, within_label, cross_results, cross_label)
+    ROW_DEFS = [
+        ('states', post_results, 'Post within-model (solid)',
+                   p2post_results, 'Pre→Post cross-patch (dashed)'),
+        ('words',  post_results, 'Post within-model (solid)',
+                   p2post_results, 'Pre→Post cross-patch (dashed)'),
+        ('states', pre_results,  'Pre within-model (solid)',
+                   p2pre_results,  'Post→Pre cross-patch (dashed)'),
+        ('words',  pre_results,  'Pre within-model (solid)',
+                   p2pre_results,  'Post→Pre cross-patch (dashed)'),
+    ]
+    letters_all = list('abcdefghijkl')
+
+    fig, axes = plt.subplots(4, 3, figsize=(FIG_LINE_W_PER_PAN * 3, (FIG_ROW_H + 0.5) * 4))
+    letter_idx = 0
+
+    for row, (plot_type, m1, l1, m2, l2) in enumerate(ROW_DEFS):
+        is_states = (plot_type == 'states')
+        keys   = STATES_KEYS if is_states else WORDS_KEYS
+        colors = BAR_COLORS  if is_states else WORDS_COLORS
+        ymin   = states_ymin if is_states else words_ymin
+        ymax   = states_ymax if is_states else words_ymax
+        type_tag = 'States NIE' if is_states else 'Words NIE'
+
+        for col, domain in enumerate(PAPER_DOMAINS):
+            ax     = axes[row, col]
+            letter = letters_all[letter_idx]
+            letter_idx += 1
+            res1 = m1.get(domain)
+            res2 = m2.get(domain)
+
+            for ki, key in enumerate(keys):
+                color = colors[ki]
+                nie1  = _nie(res1, key)
+                nie2  = _nie(res2, key)
+                if nie1 is not None:
+                    ax.plot(np.arange(len(nie1)), nie1, color=color, linewidth=2.0,
+                            linestyle='-', marker='o', markersize=3)
+                if nie2 is not None:
+                    ax.plot(np.arange(len(nie2)), nie2, color=color, linewidth=2.0,
+                            linestyle='--', marker='s', markersize=3)
+
+            ax.axhline(0, color='black', linewidth=0.7, alpha=0.4)
+            ax.set_title(f'({letter}) {domain.capitalize()} — {type_tag}\n{l1} vs {l2}',
+                         fontsize=A7_FS_TITLE)
+            ax.set_xlabel('Layer', fontsize=A7_FS_LABEL)
+            if col == 0:
+                ax.set_ylabel(Y_LABEL_NIE, fontsize=A7_FS_LABEL)
+            ax.set_ylim(ymin, ymax)
+            ax.set_xticks(np.arange(0, 16, max(1, 16 // 8)))
+            ax.tick_params(labelsize=A7_FS_TICK)
+            ax.grid(alpha=0.2)
+
+    legend_handles = []
+    for ki, cond_label in enumerate(STATES_LABELS_SHORT):
+        c = BAR_COLORS[ki]
+        legend_handles.append(
+            Line2D([0], [0], color=c, linewidth=2, linestyle='-',
+                   marker='o', markersize=4, label=f'{cond_label} — within (solid)'))
+        legend_handles.append(
+            Line2D([0], [0], color=c, linewidth=2, linestyle='--',
+                   marker='s', markersize=4, label=f'{cond_label} — cross (dashed)'))
+    legend_handles.append(Line2D([0], [0], color='none', label=''))
+    for ki, cond_label in enumerate(WORDS_LABELS_SHORT):
+        c = WORDS_COLORS[ki]
+        legend_handles.append(
+            Line2D([0], [0], color=c, linewidth=2, linestyle='-',
+                   marker='o', markersize=4, label=f'{cond_label} — within (solid)'))
+        legend_handles.append(
+            Line2D([0], [0], color=c, linewidth=2, linestyle='--',
+                   marker='s', markersize=4, label=f'{cond_label} — cross (dashed)'))
+
+    fig.legend(handles=legend_handles, loc='lower center', bbox_to_anchor=(0.5, 0.0),
+               ncol=4, fontsize=A7_FS_LEGEND, frameon=True,
+               labelspacing=1.0, handlelength=3.0, handletextpad=0.8, columnspacing=2.5)
+    fig.tight_layout(rect=[0, 0.10, 1, 1.0])
+    _savepdf(fig, os.path.join(out_dir, 'A7-crosspatch-nie-overlay.pdf'))
 
 
 # ── appendix A4: cross-patch bars (4×3) ──────────────────────────────────────
@@ -2026,9 +2303,10 @@ for model_name in (models_to_run if RUN_BARS or RUN_DELTA or RUN_COMPARE else []
             if use_local:
                 all_local    = sorted(os.listdir(local_dir))
                 single_b, attn_b, mlp_b = partition_names(all_local)
-                single_items = [os.path.join(local_dir, b) for b in single_b[:args.num_sample]]
-                attn_items   = [os.path.join(local_dir, b) for b in attn_b[:args.num_sample]]
-                mlp_items    = [os.path.join(local_dir, b) for b in mlp_b[:args.num_sample]]
+                single_b, attn_b, mlp_b = subsample_aligned(single_b, attn_b, mlp_b, args.num_sample)
+                single_items = [os.path.join(local_dir, b) for b in single_b]
+                attn_items   = [os.path.join(local_dir, b) for b in attn_b]
+                mlp_items    = [os.path.join(local_dir, b) for b in mlp_b]
                 loader       = load_npz_local
                 print(f'    [local NFS]')
             else:
@@ -2040,10 +2318,11 @@ for model_name in (models_to_run if RUN_BARS or RUN_DELTA or RUN_COMPARE else []
                     continue
                 basenames    = [os.path.basename(n) for n in all_names]
                 single_b, attn_b, mlp_b = partition_names(basenames)
+                single_b, attn_b, mlp_b = subsample_aligned(single_b, attn_b, mlp_b, args.num_sample)
                 name_map     = {os.path.basename(n): n for n in all_names}
-                single_items = [name_map[b] for b in single_b[:args.num_sample] if b in name_map]
-                attn_items   = [name_map[b] for b in attn_b[:args.num_sample]   if b in name_map]
-                mlp_items    = [name_map[b] for b in mlp_b[:args.num_sample]    if b in name_map]
+                single_items = [name_map[b] for b in single_b if b in name_map]
+                attn_items   = [name_map[b] for b in attn_b   if b in name_map]
+                mlp_items    = [name_map[b] for b in mlp_b    if b in name_map]
                 loader       = lambda p: load_npz_zip(zf, p)
                 print(f'    [zip]')
 
@@ -2207,7 +2486,7 @@ if RUN_CROSS_PATCH:
             base_res = _load_from_main_zip(_main_zf4, domain, args.num_sample)
             inst_res = load_within_model_from_local(
                 INSTRUCT, 'allenai', 'step_2000', domain, args.num_sample)
-            within_model_panels[domain] = {'s2_last': base_res, 'inst_last': inst_res}
+            within_model_panels[domain] = {'base_last': base_res, 'inst_last': inst_res}
         _main_zf4.close()
         print('\n  Generating 4-panel plots (main / step2000)...')
         _main_body_out = os.path.join(PLOTS_BASE, 'main_body')
@@ -2315,6 +2594,17 @@ if RUN_APPENDIX:
         save_appendix_A6_heatmap(_base_traj, _instruct_traj, appendix_out, args.num_sample)
     else:
         print('  [A6] Skipping.')
+
+# ── cross-patch NIE overlay (within-model vs cross-patch, 4×3) ────────────────
+if RUN_CP_NIE:
+    print('\n=== Cross-patch NIE overlay (within-model vs cross-patch) ===')
+    cp_nie_out = os.path.join(PLOTS_BASE, 'appendix')
+    os.makedirs(cp_nie_out, exist_ok=True)
+    save_crosspatch_nie_overlay(cp_nie_out, args.num_sample)
+
+    cp_mb_out = os.path.join(PLOTS_BASE, 'main_body')
+    os.makedirs(cp_mb_out, exist_ok=True)
+    save_main_body_pre_post_crosspatch(cp_mb_out, args.num_sample)
 
 zf.close()
 print('\nDone.')
