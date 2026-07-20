@@ -32,9 +32,15 @@ class StereoSetDataset(Dataset):
         self.tokenizer = tokenizer
         self.data = []
         # self.config = config
-        self.ifcausal = "gpt" in model_name.lower() or "llama" in model_name.lower() or "olmo" in model_name.lower() or "pythia" in model_name.lower()
+        self.ifcausal = "gpt" in model_name.lower() or "llama" in model_name.lower() or "olmo" in model_name.lower() or "pythia" in model_name.lower() or "qwen" in model_name.lower() or "gemma" in model_name.lower()
         self.isolmo = "olmo" in model_name.lower()
-        if self.ifcausal:
+        # qwen2.5/llama-3 have no unk_token; per EasyEdit repr_tools.py, locate the BLANK
+        # span by tokenized-length difference on the real sentence instead of unk-masking
+        self.use_empirical_blank = any(k in model_name.lower() for k in ("qwen", "llama-3", "gemma"))
+        if self.use_empirical_blank:
+            self.mask_token = None
+            self.mask_token_id = None
+        elif self.ifcausal:
             self.mask_token = tokenizer.unk_token
             self.mask_token_id = tokenizer.unk_token_id
         else:
@@ -66,7 +72,32 @@ class StereoSetDataset(Dataset):
         stereo_word = obj['data']['stereotype']['sentence'].split(" ")[word_idx].translate(str.maketrans('', '', string.punctuation))
         unrelated_word = obj['data']['unrelated']['sentence'].split(" ")[word_idx].translate(str.maketrans('', '', string.punctuation))
 
-        if "roberta" in self.tokenizer.__class__.__name__.lower():
+        if self.use_empirical_blank:
+            # No masked sentence: the fill-word token span is computed directly on the real
+            # sentence as (len(encode(prefix)), len(encode(prefix+word))) with the tokenizer's
+            # native special-token behavior, so BOS (llama-3/gemma: auto-added; qwen: none)
+            # is counted identically on both sides. Span validated by decode-back; None -> skip.
+            def word_span(sentence):
+                words = sentence.split(" ")
+                if word_idx >= len(words):
+                    return None
+                # keep the separating space attached to the word, never trailing on the
+                # prefix — a dangling space tokenizes as its own token under byte-BPE
+                prefix = " ".join(words[:word_idx])
+                word = words[word_idx].translate(str.maketrans('', '', string.punctuation))
+                sep = " " if word_idx > 0 else ""
+                start = len(self.tokenizer(prefix)["input_ids"])
+                end = len(self.tokenizer(prefix + sep + word)["input_ids"])
+                full = self.tokenizer(sentence)["input_ids"]
+                if end > len(full) or self.tokenizer.decode(full[start:end]).strip() != word:
+                    return None
+                return (start, end)
+            anti_sentence = obj['data']['anti-stereotype']['sentence']
+            stereo_sentence = obj['data']['stereotype']['sentence']
+            unrelated_sentence = obj['data']['unrelated']['sentence']
+            anti_blank_idxs = word_span(anti_sentence)
+            stereo_blank_idxs = word_span(stereo_sentence)
+        elif "roberta" in self.tokenizer.__class__.__name__.lower():
             if word_idx!=0:
                 anti_word = " " + anti_word
                 stereo_word = " " + stereo_word
@@ -129,7 +160,7 @@ class StereoSetDataset(Dataset):
                 anti_sentence = obj['context'].replace(" BLANK", self.mask_token * len(anti_blank_tokens))
                 stereo_sentence = obj['context'].replace(" BLANK", self.mask_token * len(stereo_blank_tokens))
                 unrelated_sentence = obj['context'].replace(" BLANK", self.mask_token * len(unrelated_blank_tokens))
-            elif obj['context'].startwith("BLANK "):
+            elif obj['context'].startswith("BLANK "):
                 anti_sentence = obj['context'].replace("BLANK ", self.mask_token * len(anti_blank_tokens))
                 stereo_sentence = obj['context'].replace("BLANK ", self.mask_token * len(stereo_blank_tokens))
                 unrelated_sentence = obj['context'].replace("BLANK ", self.mask_token * len(unrelated_blank_tokens))
@@ -158,6 +189,9 @@ class StereoSetDataset(Dataset):
             "target": obj['target'],
             "subject": obj['subject']
         }
+        if self.use_empirical_blank:
+            output["anti_blank_idxs"] = anti_blank_idxs
+            output["stereo_blank_idxs"] = stereo_blank_idxs
 
         return output
 

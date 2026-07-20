@@ -64,6 +64,12 @@ def main():
             "allenai/OLMo-2-0425-1B",
             "allenai/OLMo-2-0425-1B-Instruct",
             "EleutherAI/pythia-1b",
+            "Qwen/Qwen2.5-1.5B",
+            "Qwen/Qwen2.5-1.5B-Instruct",
+            "meta-llama/Llama-3.2-1B",
+            "meta-llama/Llama-3.2-1B-Instruct",
+            "google/gemma-3-1b-pt",
+            "google/gemma-3-1b-it",
         ],
     )
     aa(
@@ -81,6 +87,12 @@ def main():
             "allenai/OLMo-2-0425-1B",
             "allenai/OLMo-2-0425-1B-Instruct",
             "EleutherAI/pythia-1b",
+            "Qwen/Qwen2.5-1.5B",
+            "Qwen/Qwen2.5-1.5B-Instruct",
+            "meta-llama/Llama-3.2-1B",
+            "meta-llama/Llama-3.2-1B-Instruct",
+            "google/gemma-3-1b-pt",
+            "google/gemma-3-1b-it",
         ],
     )
     aa("--branch1", default=None)
@@ -114,6 +126,10 @@ def main():
                 torch_dtype = torch.float32
         elif 'pythia' in model_name.lower():
             torch_dtype = torch.float16
+        elif any(k in model_name.lower() for k in ("qwen", "llama-3", "gemma")):
+            torch_dtype = torch.bfloat16
+        else:
+            raise ValueError(f"No dtype rule for {model_name}")
         return torch_dtype
 
     torch_dtype_source = get_dtype(args.model_source)
@@ -182,8 +198,8 @@ def main():
 
         # original difference: base_score
         if mt_target.iscausal:
-            inp_anti, e_range_anti, blank_idxs_anti, inp_anti_origin = make_inputs(mt_target, prompts=[knowledge['anti']] * (args.samples + 1), labels=[knowledge['anti_mask']] * (args.samples + 1), subject=knowledge['subject'])
-            inp_stereo, e_range_stereo, blank_idxs_stereo, inp_stereo_origin = make_inputs(mt_target, prompts=[knowledge['stereo']] * (args.samples + 1), labels=[knowledge['stereo_mask']] * (args.samples + 1), subject=knowledge['subject'])
+            inp_anti, e_range_anti, blank_idxs_anti, inp_anti_origin = make_inputs(mt_target, prompts=[knowledge['anti']] * (args.samples + 1), labels=[knowledge['anti_mask']] * (args.samples + 1), subject=knowledge['subject'], blank_idxs=knowledge.get('anti_blank_idxs'))
+            inp_stereo, e_range_stereo, blank_idxs_stereo, inp_stereo_origin = make_inputs(mt_target, prompts=[knowledge['stereo']] * (args.samples + 1), labels=[knowledge['stereo_mask']] * (args.samples + 1), subject=knowledge['subject'], blank_idxs=knowledge.get('stereo_blank_idxs'))
             if (inp_anti==None and e_range_anti==None and blank_idxs_anti==None and inp_anti_origin==None) or (inp_stereo==None and e_range_stereo==None and blank_idxs_stereo==None and inp_stereo_origin==None):
                 continue
             if inp_anti["input_ids"].shape[1] != inp_stereo["input_ids"].shape[1]:
@@ -764,7 +780,9 @@ class ModelAndTokenizer:
     ):
         if tokenizer is None:
             assert model_name is not None
-            if "llama" in model_name.lower():
+            if any(k in model_name.lower() for k in ("qwen", "llama-3", "gemma")):
+                tokenizer = AutoTokenizer.from_pretrained(model_name)
+            elif "llama" in model_name.lower():
                 tokenizer = LlamaTokenizer.from_pretrained(model_name)
             elif model_name=="gpt2-medium":
                 tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
@@ -773,7 +791,14 @@ class ModelAndTokenizer:
                 
         if model is None:
             assert model_name is not None
-            if "llama" in model_name.lower():
+            if any(k in model_name.lower() for k in ("qwen", "llama-3", "gemma")):
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_name, low_cpu_mem_usage=low_cpu_mem_usage, torch_dtype=torch_dtype,
+                    revision=branch,
+                )
+                if tokenizer.pad_token is None:
+                    tokenizer.pad_token = tokenizer.eos_token   # llama-3.2 only; qwen/gemma ship pad tokens
+            elif "llama" in model_name.lower():
                 model = LlamaForCausalLM.from_pretrained(
                     model_name, low_cpu_mem_usage=low_cpu_mem_usage, torch_dtype=torch_dtype
                 )
@@ -820,7 +845,7 @@ class ModelAndTokenizer:
             if (re.match(r"^(transformer|gpt_neox|model|bert|roberta)\.(h|layers|encoder.layer)\.\d+$", n))
         ]
         self.num_layers = len(self.layer_names)
-        if "gpt" in model_name.lower() or "llama" in model_name.lower() or "olmo" in model_name.lower() or "pythia" in model_name.lower():
+        if "gpt" in model_name.lower() or "llama" in model_name.lower() or "olmo" in model_name.lower() or "pythia" in model_name.lower() or "qwen" in model_name.lower() or "gemma" in model_name.lower():
             self.iscausal = True
         else:
             self.iscausal = False
@@ -989,7 +1014,7 @@ def plot_trace_heatmap(result, savepdf_pre=None, title=None, xlabel=None, modeln
 
 
 # Utilities for dealing with tokens
-def make_inputs(mt, prompts, labels, subject=None, device="cuda"):    
+def make_inputs(mt, prompts, labels, subject=None, device="cuda", blank_idxs=None):
     if "gpt" in mt.model_name.lower() or "olmo" in mt.model_name.lower():
         bos = mt.tokenizer.bos_token if mt.tokenizer.bos_token is not None else mt.tokenizer.eos_token
         prompts = [bos + p for p in prompts]
@@ -1026,9 +1051,13 @@ def make_inputs(mt, prompts, labels, subject=None, device="cuda"):
             # for (b,e) in subject_range:             # ignore subjects
             #     inputs['labels'][idx][b:e] = -100
             inputs['labels'][idx][0] = -100         # ignore bos_token
-        blank_token_idxs = find_token_range(mt.tokenizer, inputslabels['input_ids'][0][1:], mt.tokenizer.unk_token)
-        if blank_token_idxs is None: return None, None, None, None
-        blank_token_idxs = (blank_token_idxs[0]+1, blank_token_idxs[1]+1)
+        if blank_idxs is not None:
+            # precomputed by StereoSetDataset via tokenized-length difference (EasyEdit convention)
+            blank_token_idxs = blank_idxs
+        else:
+            blank_token_idxs = find_token_range(mt.tokenizer, inputslabels['input_ids'][0][1:], mt.tokenizer.unk_token)
+            if blank_token_idxs is None: return None, None, None, None
+            blank_token_idxs = (blank_token_idxs[0]+1, blank_token_idxs[1]+1)
     else:
         subject_range = []
         for subj in subject:
