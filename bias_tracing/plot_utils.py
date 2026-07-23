@@ -87,9 +87,25 @@ MODEL_CONFIGS = {
 #
 # The .npz format is identical to within-model causal tracing, so the same
 # collect_scores / _draw_bars pipeline applies.
+#
+# Runs exist for several model families. Each family's data lives at
+# {base}/{family}_{direction}/{domain}/causal_trace/cases/ — the OLMo runs on
+# the shared transfer directory, the newer families in the repo-local results
+# tree (written there by scripts/cross_patch.sh on the cross-model-patching
+# branch; results/ is gitignored so the files are branch-independent).
 
-CROSS_PATCH_BASE = f'/deepfreeze/share/{name4}/results/cross_patch'
+CROSS_PATCH_BASE       = f'/deepfreeze/share/{name4}/results/cross_patch'
+CROSS_PATCH_LOCAL_BASE = f'{LOCAL_BASE}/cross_patch'
 
+CROSS_PATCH_FAMILIES = {
+    'olmo_1b':      {'base': CROSS_PATCH_BASE,       'label': 'OLMo-2 1B'},
+    'qwen2.5_1.5b': {'base': CROSS_PATCH_LOCAL_BASE, 'label': 'Qwen2.5 1.5B'},
+    'llama3.2_1b':  {'base': CROSS_PATCH_LOCAL_BASE, 'label': 'Llama-3.2 1B'},
+    'gemma3_1b':    {'base': CROSS_PATCH_LOCAL_BASE, 'label': 'Gemma-3 1B'},
+}
+
+# 'dir' is the olmo_1b run directory — kept for existing scripts (table.py,
+# regenerate_compare_plots.py) that predate the multi-family layout.
 CROSS_PATCH_CONFIGS = {
     'pre_to_post': {
         'dir':   'olmo_1b_pre_to_post',
@@ -102,6 +118,12 @@ CROSS_PATCH_CONFIGS = {
         'desc':  'Instruct activations patched into base model',
     },
 }
+
+
+def cross_patch_cases_dir(family, direction_key, domain):
+    fam = CROSS_PATCH_FAMILIES[family]
+    return os.path.join(fam['base'], f'{family}_{direction_key}',
+                        domain, 'causal_trace', 'cases')
 
 # ── style constants ───────────────────────────────────────────────────────────
 

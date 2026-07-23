@@ -37,19 +37,28 @@ Two directions:
   pre_to_post — source: base pre-trained  /  target: instruct fine-tuned
   post_to_pre — source: instruct fine-tuned  /  target: base pre-trained
 
-Per direction  →  plots/cross_patch/{direction}/
+Runs exist per model family (CROSS_PATCH_FAMILIES in plot_utils.py:
+olmo_1b, qwen2.5_1.5b, llama3.2_1b, gemma3_1b). olmo_1b keeps the original
+output paths below; newer families write to a plots/cross_patch/{family}/
+subtree with the same file names.
+
+Per direction  →  plots/cross_patch/{direction}/   (olmo_1b)
+                  plots/cross_patch/{family}/{direction}/   (other families)
     {domain}-states.pdf         bars per layer (same 3-bar layout as within-model)
     {domain}-words.pdf
     composite-states.pdf        all 4 domains side-by-side
     composite-words.pdf
     composite-all.pdf           2×4 grid
 
-Comparison (both directions)  →  plots/cross_patch/
+Comparison (both directions)  →  plots/cross_patch/   resp.  plots/cross_patch/{family}/
     {domain}-directions-states.pdf   pre→post vs post→pre, fixed Y-axis
     {domain}-directions-words.pdf
 
-Data source: local filesystem at CROSS_PATCH_BASE (defined in plot_utils.py).
-Use --direction to run only one direction.
+Appendix A4-style 4×3 grid (states/words × domains, both directions) is written
+per family: A4-cross-patch-bars.pdf (olmo_1b) / A4-cross-patch-bars-{family}.pdf.
+
+Data source: local filesystem, per-family base dirs (see plot_utils.py).
+Use --direction to run only one direction, --cp_family to run only one family.
 """
 
 import os
@@ -68,7 +77,8 @@ import matplotlib.pyplot as plt
 from plot_utils import (
     ZIP_PATH, MAIN_ZIP, PLOTS_BASE,
     MODEL_CONFIGS, BIAS_TYPES, PAPER_DOMAINS,
-    CROSS_PATCH_BASE, CROSS_PATCH_CONFIGS,
+    CROSS_PATCH_BASE, CROSS_PATCH_CONFIGS, CROSS_PATCH_FAMILIES,
+    cross_patch_cases_dir,
     STATES_LABELS, WORDS_LABELS, BAR_COLORS, STATES_COLORS, WORDS_COLORS,
     LOW_SIGNAL, Y_LABEL_BARS, Y_LABEL_NIE,
     FS_SUPTITLE, FS_TITLE, FS_LABEL, FS_TICK, FS_LEGEND, FS_ANNOT,
@@ -118,6 +128,10 @@ parser.add_argument('--direction', default=None,
                     choices=list(CROSS_PATCH_CONFIGS.keys()),
                     help='cross-patch direction to run (default: both). '
                          'Only used when cross_patch is in --plots.')
+parser.add_argument('--cp_family', default=None,
+                    choices=list(CROSS_PATCH_FAMILIES.keys()),
+                    help='cross-patch model family to run (default: all with data). '
+                         'Only used when cross_patch/appendix is in --plots.')
 args = parser.parse_args()
 
 _plots = set(args.plots)
@@ -133,6 +147,7 @@ RUN_CP_NIE      = 'cp_nie'      in _plots
 models_to_run      = [args.model]     if args.model     else list(MODEL_CONFIGS.keys())
 domains_to_run     = [args.bias]      if args.bias       else BIAS_TYPES
 directions_to_run  = [args.direction] if args.direction  else list(CROSS_PATCH_CONFIGS.keys())
+cp_families_to_run = [args.cp_family] if args.cp_family  else list(CROSS_PATCH_FAMILIES.keys())
 
 # ── data helpers ──────────────────────────────────────────────────────────────
 
@@ -661,16 +676,18 @@ def save_base_vs_instruct(base_stats, instruct_stats, out_dir):
 # File naming uses the same _{attn,mlp}.npz suffix convention, so partition_names
 # and collect_scores work without modification.
 #
-# Data lives at CROSS_PATCH_BASE/{direction_dir}/{domain}/causal_trace/cases/
+# Data lives at {family base}/{family}_{direction}/{domain}/causal_trace/cases/
 # (local filesystem, not in the zip — always read with load_npz_local).
 
-def load_cross_patch_domain(direction_key, domain, num_sample=None):
+def load_cross_patch_domain(direction_key, domain, num_sample=None, family='olmo_1b'):
     """
-    Load cross-patch .npz files for one (direction, domain) pair.
+    Load cross-patch .npz files for one (family, direction, domain) triple.
 
     direction_key : key in CROSS_PATCH_CONFIGS ('pre_to_post' or 'post_to_pre')
     domain        : one of BIAS_TYPES
     num_sample    : max files per kind (None = all)
+    family        : key in CROSS_PATCH_FAMILIES; defaults to 'olmo_1b' so all
+                    pre-existing call sites keep their original behavior
 
     Returns a result dict or None if no data is available:
       bias_mean, pre_blank_mean, blank_mean  — (n_layers,) subject / word arrays
@@ -680,8 +697,7 @@ def load_cross_patch_domain(direction_key, domain, num_sample=None):
       low_sig                                — True if effect_gap < LOW_SIGNAL
       num_layer                              — number of transformer layers
     """
-    cfg       = CROSS_PATCH_CONFIGS[direction_key]
-    cases_dir = os.path.join(CROSS_PATCH_BASE, cfg['dir'], domain, 'causal_trace', 'cases')
+    cases_dir = cross_patch_cases_dir(family, direction_key, domain)
 
     if not os.path.isdir(cases_dir):
         print(f'    [cross_patch] No directory: {cases_dir}')
@@ -738,12 +754,13 @@ def load_cross_patch_domain(direction_key, domain, num_sample=None):
     }
 
 
-def save_cross_patch_direction(direction_key, domain_results, out_dir):
+def save_cross_patch_direction(direction_key, domain_results, out_dir, family_label=''):
     """
     Per-direction individual PDFs + composite figures.
 
     domain_results : {domain: result_dict from load_cross_patch_domain}
-    out_dir        : plots/cross_patch/{direction_key}/
+    out_dir        : plots/cross_patch/{family}/{direction_key}/
+    family_label   : display name of the model family, prepended to titles
 
     Mirrors the per-checkpoint layout used for within-model tracing:
       {domain}-states.pdf      full / Attn-severed / MLP-severed bars per layer
@@ -753,7 +770,7 @@ def save_cross_patch_direction(direction_key, domain_results, out_dir):
       composite-all.pdf        2×N grid: top=states, bottom=words
     """
     cfg   = CROSS_PATCH_CONFIGS[direction_key]
-    label = cfg['label']
+    label = f'{family_label} {cfg["label"]}'.strip()
     desc  = cfg['desc']
 
     def _low_sig_decorate(ax, res):
@@ -831,14 +848,15 @@ def save_cross_patch_direction(direction_key, domain_results, out_dir):
     _savepdf(fig, os.path.join(out_dir, 'composite-all.pdf'))
 
 
-def save_cross_patch_comparison(all_direction_results, domains, out_dir):
+def save_cross_patch_comparison(all_direction_results, domains, out_dir, family_label=''):
     """
     Side-by-side comparison of both cross-patch directions for each domain.
     Y-axis is fixed across directions so the plots are directly comparable.
 
     all_direction_results : {direction_key: {domain: result_dict}}
     domains               : list of domains to include
-    out_dir               : plots/cross_patch/
+    out_dir               : plots/cross_patch/{family}/
+    family_label          : display name of the model family, shown in suptitles
 
     Outputs:
       {domain}-directions-states.pdf   pre→post vs post→pre (states restore)
@@ -878,8 +896,9 @@ def save_cross_patch_comparison(all_direction_results, domains, out_dir):
                                      figsize=(FIG_GRID_W_PER_COL * n, FIG_ROW_H))
             if n == 1:
                 axes = [axes]
+            fam = f' [{family_label}]' if family_label else ''
             fig.suptitle(
-                f'Cross-patch comparison — {domain.capitalize()} bias ({plot_type})\n'
+                f'Cross-patch comparison{fam} — {domain.capitalize()} bias ({plot_type})\n'
                 'Y-axis fixed across directions for direct comparison.',
                 fontsize=FS_SUPTITLE, fontweight='bold')
 
@@ -1986,7 +2005,8 @@ def save_crosspatch_nie_overlay(out_dir, num_sample=None, main_zf=None):
 
 # ── appendix A4: cross-patch bars (4×3) ──────────────────────────────────────
 
-def save_appendix_A4_cross_patch_bars(all_direction_results, out_dir):
+def save_appendix_A4_cross_patch_bars(all_direction_results, out_dir,
+                                      out_name='A4-cross-patch-bars.pdf'):
     """
     Appendix A4: 4×3 grid for cross-patch directions.
     Row 0 Pre→Post states · Row 1 Pre→Post words ·
@@ -2019,7 +2039,7 @@ def save_appendix_A4_cross_patch_bars(all_direction_results, out_dir):
     _bars_grid(axes, row_specs, PAPER_DOMAINS, row_ylims)
     _states_words_legend(fig)
     fig.tight_layout(rect=[0, 0.07, 1, 1.0])
-    _savepdf(fig, os.path.join(out_dir, 'A4-cross-patch-bars.pdf'))
+    _savepdf(fig, os.path.join(out_dir, out_name))
 
 
 # ── appendix A5: effect gap trajectory (3×1) ─────────────────────────────────
@@ -2447,32 +2467,49 @@ if RUN_CROSS_PATCH:
     cross_patch_out = os.path.join(PLOTS_BASE, 'cross_patch')
     os.makedirs(cross_patch_out, exist_ok=True)
 
-    all_direction_results = {}  # {direction_key: {domain: result_dict}}
+    all_direction_results = {}  # olmo_1b results — {direction_key: {domain: result_dict}}
 
-    for direction_key in directions_to_run:
-        cfg_cp = CROSS_PATCH_CONFIGS[direction_key]
-        print(f'\n  Direction: {cfg_cp["label"]}  ({cfg_cp["desc"]})')
+    for cp_family in cp_families_to_run:
+        fam_label = CROSS_PATCH_FAMILIES[cp_family]['label']
+        # olmo_1b keeps its original output paths and titles (no family suffix);
+        # newer families get a plots/cross_patch/{family}/ subtree
+        is_olmo = cp_family == 'olmo_1b'
+        fam_out = cross_patch_out if is_olmo else os.path.join(cross_patch_out, cp_family)
+        title_label = '' if is_olmo else fam_label
+        print(f'\n  Family: {fam_label}')
 
-        dir_out = os.path.join(cross_patch_out, direction_key)
-        os.makedirs(dir_out, exist_ok=True)
+        fam_direction_results = {}  # {direction_key: {domain: result_dict}}
 
-        domain_results = {}
-        for domain in domains_to_run:
-            print(f'  {domain}')
-            res = load_cross_patch_domain(direction_key, domain, args.num_sample)
-            if res is not None:
-                domain_results[domain] = res
+        for direction_key in directions_to_run:
+            cfg_cp = CROSS_PATCH_CONFIGS[direction_key]
+            print(f'\n  Direction: {cfg_cp["label"]}  ({cfg_cp["desc"]})')
 
-        if domain_results:
-            save_cross_patch_direction(direction_key, domain_results, dir_out)
-            all_direction_results[direction_key] = domain_results
+            dir_out = os.path.join(fam_out, direction_key)
+            os.makedirs(dir_out, exist_ok=True)
 
-    # comparison plot — requires both directions to have results
-    if len(all_direction_results) >= 2:
-        print('\n  Generating direction-comparison plots...')
-        save_cross_patch_comparison(all_direction_results, domains_to_run, cross_patch_out)
-    elif len(all_direction_results) == 1:
-        print('\n  Only one direction has data — skipping comparison plots.')
+            domain_results = {}
+            for domain in domains_to_run:
+                print(f'  {domain}')
+                res = load_cross_patch_domain(direction_key, domain, args.num_sample,
+                                              family=cp_family)
+                if res is not None:
+                    domain_results[domain] = res
+
+            if domain_results:
+                save_cross_patch_direction(direction_key, domain_results, dir_out,
+                                           family_label=title_label)
+                fam_direction_results[direction_key] = domain_results
+
+        # comparison plot — requires both directions to have results
+        if len(fam_direction_results) >= 2:
+            print('\n  Generating direction-comparison plots...')
+            save_cross_patch_comparison(fam_direction_results, domains_to_run, fam_out,
+                                        family_label=title_label)
+        elif len(fam_direction_results) == 1:
+            print('\n  Only one direction has data — skipping comparison plots.')
+
+        if is_olmo:
+            all_direction_results = fam_direction_results
 
     # 4-panel comparison: within-model last checkpoints + both cross-patch directions
     # Base: OLMo-2-0425-1B main checkpoint (from main.zip)
@@ -2569,17 +2606,23 @@ if RUN_APPENDIX:
     _app_main_zf.close()
 
     print('\n  A4: Cross-patch bar charts (4×3)...')
-    _app_cp = {}
-    for _dk in ('pre_to_post', 'post_to_pre'):
-        _dr = {}
-        for _dom in PAPER_DOMAINS:
-            print(f'    {_dk} / {_dom}')
-            _res = load_cross_patch_domain(_dk, _dom, args.num_sample)
-            if _res is not None:
-                _dr[_dom] = _res
-        if _dr:
-            _app_cp[_dk] = _dr
-    save_appendix_A4_cross_patch_bars(_app_cp, appendix_out)
+    for _fam in cp_families_to_run:
+        # olmo_1b keeps the original A4-cross-patch-bars.pdf name; newer
+        # families get a -{family} suffix
+        _fname = ('A4-cross-patch-bars.pdf' if _fam == 'olmo_1b'
+                  else f'A4-cross-patch-bars-{_fam}.pdf')
+        print(f'    family: {_fam}')
+        _app_cp = {}
+        for _dk in ('pre_to_post', 'post_to_pre'):
+            _dr = {}
+            for _dom in PAPER_DOMAINS:
+                print(f'    {_dk} / {_dom}')
+                _res = load_cross_patch_domain(_dk, _dom, args.num_sample, family=_fam)
+                if _res is not None:
+                    _dr[_dom] = _res
+            if _dr:
+                _app_cp[_dk] = _dr
+        save_appendix_A4_cross_patch_bars(_app_cp, appendix_out, out_name=_fname)
 
     print('\n  A5: Trajectory plots (1×3)...')
     _base_traj     = _load_checkpoints_from_npz('OLMo-2-0425-1B',          args.num_sample)
