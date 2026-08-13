@@ -1,328 +1,85 @@
+import json
+import string
 
-# from pathlib import Path
-# import jsonlines, json, string, random, logging, copy
-import numpy as np
-import torch, json, string
-from torch.utils.data import Dataset
-# from utils import EditBatchSampler, dict_to, scr
-from tqdm import tqdm
-import copy
-
-import torch
 from torch.utils.data import Dataset
 
 from util.globals import *
 
-from transformers import (
-    BertTokenizerFast,
-    GPT2TokenizerFast,
-    LlamaTokenizer
-)
 
 class StereoSetDataset(Dataset):
-    def __init__(
-        self,
-        tokenizer,
-        data_path,
-        # config,
-        model_name,
-        # max_length=64
-    ):
+    """StereoSet intrasentence samples for causal-LM bias tracing.
+
+    Each item carries the two real sentences (anti/stereo) plus the token span
+    of the word that filled BLANK, located by word_span and decode-verified.
+    """
+
+    def __init__(self, tokenizer, data_path, model_name):
         super().__init__()
         self.tokenizer = tokenizer
-        self.data = []
-        # self.config = config
-        self.ifcausal = "gpt" in model_name.lower() or "llama" in model_name.lower() or "olmo" in model_name.lower() or "pythia" in model_name.lower() or "qwen" in model_name.lower() or "gemma" in model_name.lower()
-        self.isolmo = "olmo" in model_name.lower()
-        # qwen2.5/llama-3 have no unk_token; per EasyEdit repr_tools.py, locate the BLANK
-        # span by tokenized-length difference on the real sentence instead of unk-masking
-        self.use_empirical_blank = any(k in model_name.lower() for k in ("qwen", "llama-3", "gemma"))
-        if self.use_empirical_blank:
-            self.mask_token = None
-            self.mask_token_id = None
-        elif self.ifcausal:
-            self.mask_token = tokenizer.unk_token
-            self.mask_token_id = tokenizer.unk_token_id
-        else:
-            self.mask_token = tokenizer.mask_token
-            self.mask_token_id = tokenizer.mask_token_id
+        self.use_empirical_blank = True   # causal-only pipeline
+
+        # gpt2/olmo/pythia inputs get a start marker glued on (see make_inputs),
+        # shifting every position right by 1. word_span measures the raw sentence, so:
+        #   raw [My][ father][ is][ chief] span (3,4) -> fed [<eot>][My].. span (4,5)
+        # llama/gemma: tokenizer adds BOS itself; qwen: none by design -> offset 0.
+        self._span_offset = 0
+        if any(k in model_name.lower() for k in ("gpt", "olmo", "pythia")):
+            marker = tokenizer.bos_token if tokenizer.bos_token is not None else tokenizer.eos_token
+            self._span_offset = len(tokenizer(marker, add_special_tokens=False)["input_ids"])
 
         data = json.load(open(data_path))
-        for d in data:
-            self.data.append({k: d[k] for k in ["id", "target", "bias_type", "context", "data", "subject"]})
-        
-        # self.max_length = max_length
-
+        self.data = [{k: d[k] for k in ["id", "target", "bias_type", "context", "data", "subject"]}
+                     for d in data]
         print(f"Loaded dataset with {len(self)} elements")
-    
+
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, item):
         obj = self.data[item]
-        word_idx = None
-        for idx, word in enumerate(obj["context"].split(" ")):
-            if "BLANK" in word: 
-                word_idx = idx
-                break
+        word_idx = next((i for i, w in enumerate(obj["context"].split(" ")) if "BLANK" in w), None)
         if word_idx is None:
             raise Exception("No blank word found.")
-        
-        anti_word = obj['data']['anti-stereotype']['sentence'].split(" ")[word_idx].translate(str.maketrans('', '', string.punctuation))
-        stereo_word = obj['data']['stereotype']['sentence'].split(" ")[word_idx].translate(str.maketrans('', '', string.punctuation))
-        unrelated_word = obj['data']['unrelated']['sentence'].split(" ")[word_idx].translate(str.maketrans('', '', string.punctuation))
 
-        if self.use_empirical_blank:
-            # No masked sentence: the fill-word token span is computed directly on the real
-            # sentence as (len(encode(prefix)), len(encode(prefix+word))) with the tokenizer's
-            # native special-token behavior, so BOS (llama-3/gemma: auto-added; qwen: none)
-            # is counted identically on both sides. Span validated by decode-back; None -> skip.
-            def word_span(sentence):
-                words = sentence.split(" ")
-                if word_idx >= len(words):
-                    return None
-                # keep the separating space attached to the word, never trailing on the
-                # prefix — a dangling space tokenizes as its own token under byte-BPE
-                prefix = " ".join(words[:word_idx])
-                word = words[word_idx].translate(str.maketrans('', '', string.punctuation))
-                sep = " " if word_idx > 0 else ""
-                start = len(self.tokenizer(prefix)["input_ids"])
-                end = len(self.tokenizer(prefix + sep + word)["input_ids"])
-                full = self.tokenizer(sentence)["input_ids"]
-                if end > len(full) or self.tokenizer.decode(full[start:end]).strip() != word:
-                    return None
-                return (start, end)
-            anti_sentence = obj['data']['anti-stereotype']['sentence']
-            stereo_sentence = obj['data']['stereotype']['sentence']
-            unrelated_sentence = obj['data']['unrelated']['sentence']
-            anti_blank_idxs = word_span(anti_sentence)
-            stereo_blank_idxs = word_span(stereo_sentence)
-        elif "roberta" in self.tokenizer.__class__.__name__.lower():
-            if word_idx!=0:
-                anti_word = " " + anti_word
-                stereo_word = " " + stereo_word
-                unrelated_word = " " + unrelated_word
-                anti_blank_tokens = self.tokenizer.encode(anti_word, add_special_tokens=False)
-                stereo_blank_tokens = self.tokenizer.encode(stereo_word, add_special_tokens=False)
-                unrelated_blank_tokens = self.tokenizer.encode(unrelated_word, add_special_tokens=False)
-            else:
-                anti_blank_tokens = self.tokenizer.encode(anti_word, add_special_tokens=False)
-                stereo_blank_tokens = self.tokenizer.encode(stereo_word, add_special_tokens=False)
-                unrelated_blank_tokens = self.tokenizer.encode(unrelated_word, add_special_tokens=False)
-            anti_sentence = obj['context'].replace("BLANK", self.mask_token * len(anti_blank_tokens))
-            stereo_sentence = obj['context'].replace("BLANK", self.mask_token * len(stereo_blank_tokens))
-            unrelated_sentence = obj['context'].replace("BLANK", self.mask_token * len(unrelated_blank_tokens))
-        elif "gpt" in self.tokenizer.__class__.__name__.lower():
-            if " BLANK" in obj['context']:
-                anti_word = " " + anti_word
-                stereo_word = " " + stereo_word
-                unrelated_word = " " + unrelated_word
-                anti_blank_tokens = self.tokenizer.encode(anti_word, add_special_tokens=False)
-                stereo_blank_tokens = self.tokenizer.encode(stereo_word, add_special_tokens=False)
-                unrelated_blank_tokens = self.tokenizer.encode(unrelated_word, add_special_tokens=False)
-                anti_sentence = obj['context'].replace(" BLANK", self.mask_token * len(anti_blank_tokens))
-                stereo_sentence = obj['context'].replace(" BLANK", self.mask_token * len(stereo_blank_tokens))
-                unrelated_sentence = obj['context'].replace(" BLANK", self.mask_token * len(unrelated_blank_tokens))
-            else:
-                anti_blank_tokens = self.tokenizer.encode(anti_word, add_special_tokens=False)
-                stereo_blank_tokens = self.tokenizer.encode(stereo_word, add_special_tokens=False)
-                unrelated_blank_tokens = self.tokenizer.encode(unrelated_word, add_special_tokens=False)
-                anti_sentence = obj['context'].replace("BLANK", self.mask_token * len(anti_blank_tokens))
-                stereo_sentence = obj['context'].replace("BLANK", self.mask_token * len(stereo_blank_tokens))
-                unrelated_sentence = obj['context'].replace("BLANK", self.mask_token * len(unrelated_blank_tokens))
-        elif self.isolmo:
-            if " BLANK" in obj['context']:
-                anti_word = " " + anti_word
-                stereo_word = " " + stereo_word
-                unrelated_word = " " + unrelated_word
-                anti_blank_tokens = self.tokenizer.encode(anti_word, add_special_tokens=False)
-                stereo_blank_tokens = self.tokenizer.encode(stereo_word, add_special_tokens=False)
-                unrelated_blank_tokens = self.tokenizer.encode(unrelated_word, add_special_tokens=False)
-                anti_sentence = obj['context'].replace(" BLANK", self.mask_token * len(anti_blank_tokens))
-                stereo_sentence = obj['context'].replace(" BLANK", self.mask_token * len(stereo_blank_tokens))
-                unrelated_sentence = obj['context'].replace(" BLANK", self.mask_token * len(unrelated_blank_tokens))
-            else:
-                anti_blank_tokens = self.tokenizer.encode(anti_word, add_special_tokens=False)
-                stereo_blank_tokens = self.tokenizer.encode(stereo_word, add_special_tokens=False)
-                unrelated_blank_tokens = self.tokenizer.encode(unrelated_word, add_special_tokens=False)
-                anti_sentence = obj['context'].replace("BLANK", self.mask_token * len(anti_blank_tokens))
-                stereo_sentence = obj['context'].replace("BLANK", self.mask_token * len(stereo_blank_tokens))
-                unrelated_sentence = obj['context'].replace("BLANK", self.mask_token * len(unrelated_blank_tokens))
-        elif "llama" in self.tokenizer.__class__.__name__.lower():
-            anti_blank_tokens = self.tokenizer.encode(anti_word, add_special_tokens=False)
-            stereo_blank_tokens = self.tokenizer.encode(stereo_word, add_special_tokens=False)
-            unrelated_blank_tokens = self.tokenizer.encode(unrelated_word, add_special_tokens=False)
-            if " BLANK " in obj['context']:
-                anti_sentence = obj['context'].replace(" BLANK ", self.mask_token * len(anti_blank_tokens))
-                stereo_sentence = obj['context'].replace(" BLANK ", self.mask_token * len(stereo_blank_tokens))
-                unrelated_sentence = obj['context'].replace(" BLANK ", self.mask_token * len(unrelated_blank_tokens))
-            elif " BLANK" in obj['context']:
-                anti_sentence = obj['context'].replace(" BLANK", self.mask_token * len(anti_blank_tokens))
-                stereo_sentence = obj['context'].replace(" BLANK", self.mask_token * len(stereo_blank_tokens))
-                unrelated_sentence = obj['context'].replace(" BLANK", self.mask_token * len(unrelated_blank_tokens))
-            elif obj['context'].startswith("BLANK "):
-                anti_sentence = obj['context'].replace("BLANK ", self.mask_token * len(anti_blank_tokens))
-                stereo_sentence = obj['context'].replace("BLANK ", self.mask_token * len(stereo_blank_tokens))
-                unrelated_sentence = obj['context'].replace("BLANK ", self.mask_token * len(unrelated_blank_tokens))
-            else: # start with BLANK+punctuation
-                anti_sentence = obj['context'].replace("BLANK", self.mask_token * len(anti_blank_tokens))
-                stereo_sentence = obj['context'].replace("BLANK", self.mask_token * len(stereo_blank_tokens))
-                unrelated_sentence = obj['context'].replace("BLANK", self.mask_token * len(unrelated_blank_tokens))
-        else:   # bert
-            anti_blank_tokens = self.tokenizer.encode(anti_word, add_special_tokens=False)
-            stereo_blank_tokens = self.tokenizer.encode(stereo_word, add_special_tokens=False)
-            unrelated_blank_tokens = self.tokenizer.encode(unrelated_word, add_special_tokens=False)
-            anti_sentence = obj['context'].replace("BLANK", self.mask_token * len(anti_blank_tokens))
-            stereo_sentence = obj['context'].replace("BLANK", self.mask_token * len(stereo_blank_tokens))
-            unrelated_sentence = obj['context'].replace("BLANK", self.mask_token * len(unrelated_blank_tokens))
+        def clean(sentence):
+            # the word that filled BLANK, punctuation stripped ("chief." -> "chief")
+            return sentence.split(" ")[word_idx].translate(str.maketrans('', '', string.punctuation))
 
-        output = {
-            "id": obj['id'],
+        def word_span(sentence):
+            """(start, end) token span of the fill word; None (=skip) if unverifiable.
+
+            e.g. "My father is chief operator.", word_idx=3:
+                 len(tok("My father is")) = 4, len(tok("My father is chief")) = 5 -> (4, 5)
+            """
+            words = sentence.split(" ")
+            if word_idx >= len(words):
+                return None
+            prefix = " ".join(words[:word_idx])
+            word = clean(sentence)
+            sep = " " if word_idx > 0 else ""   # space rides WITH the word (byte-BPE fuses it)
+            start = len(self.tokenizer(prefix)["input_ids"])
+            end = len(self.tokenizer(prefix + sep + word)["input_ids"])
+            full = self.tokenizer(sentence)["input_ids"]
+            if end > len(full) or self.tokenizer.decode(full[start:end]).strip() != word:
+                return None
+            # proof ran in raw coords; return in model-input coords (+marker offset)
+            return (start + self._span_offset, end + self._span_offset)
+
+        anti = obj["data"]["anti-stereotype"]["sentence"]
+        stereo = obj["data"]["stereotype"]["sentence"]
+        unrelated = obj["data"]["unrelated"]["sentence"]
+        return {
+            "id": obj["id"],
             "context": obj["context"],
-            "anti": obj["data"]["anti-stereotype"]['sentence'],
-            "stereo": obj["data"]["stereotype"]['sentence'],
-            "unrelated": obj["data"]["unrelated"]['sentence'],
-            "anti_mask": anti_sentence,
-            "stereo_mask": stereo_sentence,
-            "unrelated_mask": unrelated_sentence,
-            "attribute": {"anti": anti_word, "stereo": stereo_word, "unrelated": unrelated_word},
-            "target": obj['target'],
-            "subject": obj['subject']
+            "anti": anti,
+            "stereo": stereo,
+            "unrelated": unrelated,
+            "anti_mask": anti,          # interface compat: no masking, = real sentence
+            "stereo_mask": stereo,
+            "unrelated_mask": unrelated,
+            "attribute": {"anti": clean(anti), "stereo": clean(stereo), "unrelated": clean(unrelated)},
+            "target": obj["target"],
+            "subject": obj["subject"],
+            "anti_blank_idxs": word_span(anti),
+            "stereo_blank_idxs": word_span(stereo),
         }
-        if self.use_empirical_blank:
-            output["anti_blank_idxs"] = anti_blank_idxs
-            output["stereo_blank_idxs"] = stereo_blank_idxs
-
-        return output
-
-    # def collate_fn(self, batch):
-    #     for b in batch:
-    #         word_idx = None
-    #         for idx, word in enumerate(b["context"].split(" ")):
-    #             if "BLANK" in word: 
-    #                 word_idx = idx
-    #                 break
-    #         if word_idx is None:
-    #             raise Exception("No blank word found.")
-            
-    #         anti_word = b['anti-stereotype'].split(" ")[word_idx].translate(str.maketrans('', '', string.punctuation))
-    #         stereo_word = b['stereotype'].split(" ")[word_idx].translate(str.maketrans('', '', string.punctuation))
-    #         unrelated_word = b['unrelated'].split(" ")[word_idx].translate(str.maketrans('', '', string.punctuation))
-            
-    #         anti_blank_tokens = self.tokenizer.encode(anti_word, add_special_tokens=False)
-    #         stereo_blank_tokens = self.tokenizer.encode(stereo_word, add_special_tokens=False)
-    #         unrelated_blank_tokens = self.tokenizer.encode(unrelated_word, add_special_tokens=False)
-            
-    #         anti_sentence = b['context'].replace("BLANK", self.mask_token * len(anti_blank_tokens))
-    #         stereo_sentence = b['context'].replace("BLANK", self.mask_token * len(stereo_blank_tokens))
-    #         unrelated_sentence = b['context'].replace("BLANK", self.mask_token * len(unrelated_blank_tokens))
-            
-    #         b['template_word'] = {"anti": anti_word, "stereo": stereo_word, "unrelated": unrelated_word}
-    #         b["input_sentence"] = {"anti": anti_sentence, "stereo": stereo_sentence, "unrelated": unrelated_sentence}
-    #         b["blank_tokens"] = {"anti": anti_blank_tokens, "stereo": stereo_blank_tokens, "unrelated": unrelated_blank_tokens}
-
-    #     if not self.ifcausal:
-    #         anti_src = [b["input_sentence"]["anti"] for b in batch]
-    #         stereo_src = [b["input_sentence"]["stereo"] for b in batch]
-    #         unrelated_src = [b["input_sentence"]["unrelated"] for b in batch]
-    #         anti_labels = [b["anti-stereotype"] for b in batch]
-    #         stereo_labels = [b["stereotype"] for b in batch]
-    #         unrelated_labels = [b["unrelated"] for b in batch]
-    #     else:
-    #         anti_src = [self.tokenizer.bos_token + b["input_sentence"]["anti"] for b in batch]
-    #         stereo_src = [self.tokenizer.bos_token + b["input_sentence"]["stereo"] for b in batch]
-    #         unrelated_src = [self.tokenizer.bos_token + b["input_sentence"]["unrelated"] for b in batch]
-    #         anti_labels = [self.tokenizer.bos_token + b["anti-stereotype"] for b in batch]
-    #         stereo_labels = [self.tokenizer.bos_token + b["stereotype"] for b in batch]
-    #         unrelated_labels = [self.tokenizer.bos_token + b["unrelated"] for b in batch]
-
-    #     res = [("anti", anti_src, "anti_labels", anti_labels), 
-    #            ("stereo", stereo_src, "stereo_labels", stereo_labels),
-    #            ("unrelated", unrelated_src, "unrelated_labels", unrelated_labels)]
-
-    #     batches = {}
-    #     for strsrc, srcs, labelstr, label in res:
-    #         if not self.ifcausal:
-    #             encoded = self.tokenizer(
-    #                 srcs,
-    #                 return_tensors="pt",
-    #                 padding="max_length",
-    #                 max_length=self.max_length,
-    #                 truncation=True,
-    #             )
-    #             assert self.max_length == encoded['input_ids'].shape[1]
-    #             labels = self.tokenizer(
-    #                 label,
-    #                 return_tensors="pt",
-    #                 padding="max_length",
-    #                 max_length=self.max_length,
-    #                 truncation=True,
-    #             )
-    #             assert self.max_length == labels['input_ids'].shape[1]
-
-    #             batches[f"{strsrc}"] = copy.deepcopy(dict(encoded.items()))
-
-    #             for idx, input_ids in enumerate(labels["input_ids"]):
-    #                 labels['input_ids'][idx] = torch.where(encoded['input_ids'][idx] == self.mask_token_id, input_ids, -100)
-    #             batches[f"{strsrc}"]["labels"] = labels["input_ids"]
-
-    #         else:
-    #             encoded = self.tokenizer(
-    #                 srcs,
-    #                 return_tensors="pt",
-    #                 padding="max_length",
-    #                 max_length=self.max_length,
-    #                 truncation=True,
-    #             )
-    #             assert self.max_length == encoded['input_ids'].shape[1]
-    #             labels = self.tokenizer(
-    #                 label,
-    #                 return_tensors="pt",
-    #                 padding="max_length",
-    #                 max_length=self.max_length,
-    #                 truncation=True,
-    #             )
-    #             batches[f"{strsrc}"] = copy.deepcopy(dict(labels.items()))
-    #             for idx, input_ids in enumerate(labels["input_ids"]):
-    #                 labels['input_ids'][idx] = torch.where(encoded['input_ids'][idx] != self.tokenizer.pad_token_id, input_ids, -100)
-    #                 labels['input_ids'][idx][0] = -100
-    #             batches[f"{strsrc}"]["labels"] = labels["input_ids"]
-
-                
-                
-
-    #     batches["raw"] = batch
-    #     return batches
-
-    # def edit_generator(self, batch_size, n=None):
-    #     if n is None:
-    #         n = len(self)
-    #     sampler = EditBatchSampler(n, memorize_mode=self.config.single_batch, seed=self.config.seed)
-    #     while True:
-    #         edit_idxs = sampler.stereosample(batch_size)
-
-    #         toks = self.collate_fn([self[idx] for idx in edit_idxs])
-
-    #         edit_inner = {"anti":toks['anti'], "stereo":toks['stereo']}
-
-    #         edit_outer = edit_inner
-
-    #         loc = toks["unrelated"]
-
-    #         cond = None
-
-    #         batch = {
-    #             "edit_inner": edit_inner,
-    #             "edit_outer": edit_outer,
-    #             "loc": loc,
-    #             "cond": cond
-    #         }
-    #         yield dict_to(batch, self.config.device)
-
-# if __name__ == "__main__":
-#     tokenizer = LlamaTokenizer.from_pretrained("llama-2-7b")
-#     dataset = StereoSetDataset(tokenizer, "data/stereoset/test.json", None)
-#     batch = [dataset[idx] for idx in [5,6,7,8]]
-#     sample = next(dataset.edit_generator(4))
-#     print(sample)
-
