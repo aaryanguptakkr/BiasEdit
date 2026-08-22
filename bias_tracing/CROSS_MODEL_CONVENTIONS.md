@@ -30,8 +30,8 @@ Evidence:
   which is exactly what we do for the new families.
 
 Safety of the no-BOS path for Qwen: `causal_difference` shifts targets
-(`pred[:, :-1]` vs `targ[:, 1:]`), so the position-0 label is never scored regardless of
-whether position 0 is a special token (OLMo-style) or content (Pythia/Qwen-style).
+(`pred[:, :-1]` vs `targ[:, 1:]`). A BLANK beginning at position 0 therefore has no
+preceding logits for its first token and is explicitly skipped.
 
 Paper caveat (cite Sun et al., "Massive Activations in LLMs", COLM 2024, App. A.3):
 attention-sink "massive activations" concentrate on the first token in a
@@ -98,12 +98,9 @@ Per-case `.npz` caching means a scaled-window ablation can be added later increm
 
 ### 6. Known risks / open items
 
-- **Gemma + `find_token_range` (subject location):** ROME's char-join over per-token
-  decodes can misalign on SentencePiece tokenizers whose single-token decode drops leading
-  whitespace; multi-word subjects are the risk case. No established repo has run ROME-style
-  tracing on Gemma (EasyEdit ships no Gemma ROME config — we are first). The sanity check
-  must explicitly validate subject spans on Gemma, including multi-word subjects; fallback
-  fix if it fails: HF `return_offsets_mapping` based location.
+- **Subject location:** production uses fast-tokenizer `offset_mapping` plus complete-word
+  matching. The decode-and-join path remains only for legacy slow tokenizers. The sanity
+  check validates multi-word subjects explicitly.
 - No verified precedent exists for masked/placeholder-token scoring of StereoSet blanks on
   causal LMs — our pipeline's use of the masked sentence purely for *locating* the blank
   (never scored, never fed to the model) should be stated in the paper to preempt the

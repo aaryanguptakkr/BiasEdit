@@ -1,5 +1,5 @@
 import argparse
-import json, copy
+import json
 import os, sys
 import time, datetime
 # os.chdir(sys.path[0])
@@ -9,8 +9,6 @@ from collections import defaultdict
 
 import numpy
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 from transformers import (
@@ -25,6 +23,9 @@ from transformers import (
 from dsets import StereoSetDataset
 from util import nethook
 from tqdm import tqdm
+
+SCORE_METRIC = "blank_logprob_stereo_minus_anti_v1"
+
 
 def main():
     parser = argparse.ArgumentParser(description="Causal Tracing")
@@ -165,22 +166,16 @@ def main():
     print(f"[run_log] started: model={model_base} domain={domain} layers={mt_target.num_layers} samples={len(knowns)}")
 
     for knowledge in tqdm(knowns):
-        ifskip = False
-        for word in knowledge['subject']:
-            if word not in knowledge['anti'] or word not in knowledge['stereo']:
-                print(f"Skipping {knowledge['id']}")
-                ifskip = True
-                break
-        if ifskip:
-            continue
         known_id = knowledge["id"]
 
-        # original difference: base_score
+        # Clean target-model preference at the BLANK fill.
         inp_anti, e_range_anti, blank_idxs_anti, inp_anti_origin = make_inputs(mt_target, prompts=[knowledge['anti']] * (args.samples + 1), labels=[knowledge['anti_mask']] * (args.samples + 1), subject=knowledge['subject'], blank_idxs=knowledge.get('anti_blank_idxs'))
         inp_stereo, e_range_stereo, blank_idxs_stereo, inp_stereo_origin = make_inputs(mt_target, prompts=[knowledge['stereo']] * (args.samples + 1), labels=[knowledge['stereo_mask']] * (args.samples + 1), subject=knowledge['subject'], blank_idxs=knowledge.get('stereo_blank_idxs'))
         if inp_anti is None or inp_stereo is None:
+            print(f"Skipping {known_id}: subject or BLANK span could not be aligned")
             continue
         if inp_anti["input_ids"].shape[1] != inp_stereo["input_ids"].shape[1]:
+            print(f"Skipping {known_id}: anti/stereo token lengths differ")
             continue
         with torch.no_grad():
             pred_anti = _logits(mt_target.model(**inp_anti))
@@ -190,7 +185,7 @@ def main():
             base_score = causal_difference(pred_anti, targ_anti, pred_stereo, targ_stereo)
             print(base_score)
         
-        # difference after corrupting the embedding of bias attribute words, the lowest difference
+        # Preference after corrupting the subject embeddings.
         anti_outputs = trace_with_patch(
             model_source=mt_source.model,
             model_target=mt_target.model,
@@ -216,14 +211,28 @@ def main():
         pred_stereo = _logits(stereo_outputs)
         targ_stereo = inp_stereo["labels"]
 
-        # log-prob difference over the whole sentence, corrupted rows only
+        # Corrupted target-model preference at the BLANK fill, corrupted rows only.
         low_score = causal_difference(pred_anti[1:], targ_anti[1:], pred_stereo[1:], targ_stereo[1:])
 
         for kind in None, "mlp", "attn":
             print(f"Causal Tracing for {known_id} {kind} ==========================================================")
             kind_suffix = f"_{kind}" if kind else ""
             filename = f"{result_dir}/knowledge_{known_id}{kind_suffix}.npz"
-            if not os.path.isfile(filename):
+            numpy_result = None
+            if os.path.isfile(filename):
+                with numpy.load(filename, allow_pickle=True) as cached:
+                    cached_result = dict(cached)
+                cached_metric = str(numpy.asarray(cached_result.get("score_metric", "")).item())
+                cached_source = str(numpy.asarray(cached_result.get("source_model", "")).item())
+                cached_target = str(numpy.asarray(cached_result.get("target_model", "")).item())
+                if (cached_metric == SCORE_METRIC and
+                        cached_source == args.model_source and
+                        cached_target == args.model_target):
+                    numpy_result = cached_result
+                else:
+                    print(f"Recomputing {filename}: cached metric or direction is stale")
+
+            if numpy_result is None:
                 result = calculate_hidden_flow(
                     mt_source,
                     mt_target,
@@ -244,16 +253,15 @@ def main():
                 if not result:
                     print(f"Skipping {knowledge['id']}")
                     continue
-                result["high_score"] = base_score               # before causal tracing, the original prob difference of bias term                                                                   
-                result["low_score"] = low_score                 # after corrupting embedding, return the prob difference of bias term
+                result["high_score"] = base_score
+                result["low_score"] = low_score
+                result["nie"] = normalized_indirect_effect(result["scores"], base_score, low_score)
                 numpy_result = {
                     # MODIFIED: to prevent unsupported ScalarType BFloat16 in numpy cast to float32 first
                     k: v.detach().to(torch.float32).cpu().numpy() if torch.is_tensor(v) else v
                     for k, v in result.items()
                 }
                 numpy.savez(filename, **numpy_result)
-            else:
-                numpy_result = numpy.load(filename, allow_pickle=True)
             # if not numpy_result["correct_prediction"]:
             #     tqdm.write(f"Skipping {knowledge['prompt']}")
             #     continue
@@ -445,40 +453,32 @@ def _logits(x):
     return x if not hasattr(x, "logits") else x.logits
 
 def causal_difference(pred_anti, targ_anti, pred_stereo, targ_stereo):
-    
     if pred_anti.dim() == 3 and pred_stereo.dim() == 3:  # Dealing with sequences
         pred_anti = pred_anti[:, :-1]  # Remove last prediction in sequence
         targ_anti = targ_anti[:, 1:]  # Shift to align predictions and targets
         pred_stereo = pred_stereo[:, :-1]
         targ_stereo = targ_stereo[:, 1:]
-    
-    def get_score(p,t):
-            mask_idxs = (t != -100)
-            template_word_idxs = []
-            for i in range(len(t)):
-                if t[i] != -100:
-                    template_word_idxs.append(t[i])
-            ele_probs = p.log_softmax(-1)[mask_idxs]
-            ele_probs = ele_probs.index_select(dim=1, index=torch.tensor(template_word_idxs).to(pred_anti.device)).diag()
-            return ele_probs.mean()
-    
-    anti_score = get_score(pred_anti[0], targ_anti[0]).unsqueeze(0)
-    for batch_idx, (p, t) in enumerate(zip(pred_anti, targ_anti)):
-        if batch_idx==0:
-            continue
-        anti_score = torch.cat((anti_score, get_score(p, t).unsqueeze(0)), dim=0)   # (batch_size, )
-          
 
-    stereo_score = get_score(pred_stereo[0], targ_stereo[0]).unsqueeze(0)
-    for batch_idx, (p, t) in enumerate(zip(pred_stereo, targ_stereo)):
-        if batch_idx==0:
-            continue
-        stereo_score = torch.cat((stereo_score, get_score(p, t).unsqueeze(0)), dim=0)   # (batch_size, )
-    
-    return torch.abs(anti_score.mean() - stereo_score.mean())
-    
-    # return F.kl_div(input=anti_score, target=stereo_score, reduction="batchmean", log_target=False) + F.kl_div(input=F.softmax(stereo_score, dim=-1), target=anti_score, reduction="batchmean", log_target=False)
-   
+    def get_score(predictions, targets):
+        mask = targets != -100
+        if not mask.any():
+            raise ValueError("No scoreable BLANK tokens remain after causal-LM shifting")
+        token_log_probs = predictions.float().log_softmax(-1)[mask]
+        target_ids = targets[mask].long().unsqueeze(1)
+        return token_log_probs.gather(1, target_ids).mean()
+
+    anti_score = torch.stack([get_score(p, t) for p, t in zip(pred_anti, targ_anti)])
+    stereo_score = torch.stack([get_score(p, t) for p, t in zip(pred_stereo, targ_stereo)])
+    return stereo_score.mean() - anti_score.mean()
+
+
+def normalized_indirect_effect(scores, high_score, low_score):
+    high_score = torch.as_tensor(high_score, device=scores.device, dtype=scores.dtype)
+    low_score = torch.as_tensor(low_score, device=scores.device, dtype=scores.dtype)
+    gap = high_score - low_score
+    if torch.abs(gap).item() < 1e-8:
+        return torch.full_like(scores, float("nan"))
+    return (scores - low_score) / gap
 
 def calculate_hidden_flow(
     mt_source,
@@ -534,7 +534,13 @@ def calculate_hidden_flow(
         )
     differences = differences.detach().cpu()                            #(seq_len, num_layers)
     return dict(
-        scores=differences,                                             
+        scores=differences,
+        score_metric=SCORE_METRIC,
+        case_id=knowledge["id"],
+        source_model=mt_source.model_name,
+        target_model=mt_target.model_name,
+        direction=f"{mt_source.model_name} -> {mt_target.model_name}",
+        num_layers=mt_target.num_layers,
         anti_input_ids=inp_anti["input_ids"][0],                               # input_ids of the prompt
         stereo_input_ids=inp_stereo['input_ids'][0],
         input_tokens_anti=decode_tokens(mt_target.tokenizer, inp_anti["input_ids"][0]),      # tokens of the prompt
@@ -793,8 +799,10 @@ def layername(model, num, kind=None):
 
 
 def plot_trace_heatmap(result, savepdf_pre=None, title=None, xlabel=None, modelname=None):
-    differences = result["scores"]
-    low_score = result["low_score"]
+    differences = result["nie"]
+    color_limit = numpy.nanmax(numpy.abs(differences))
+    if not numpy.isfinite(color_limit) or color_limit == 0:
+        color_limit = 1.0
     answer = result["subject"]
     kind = (
         None
@@ -817,15 +825,14 @@ def plot_trace_heatmap(result, savepdf_pre=None, title=None, xlabel=None, modeln
         fig, ax = plt.subplots(figsize=(3.5, 2), dpi=200)
         h = ax.pcolor(
             differences,
-            cmap={None: "Purples", "None": "Purples", "mlp": "Greens", "attn": "Reds"}[
-                kind
-            ],
-            vmin=low_score,
+            cmap="RdBu_r",
+            vmin=-color_limit,
+            vmax=color_limit,
         )
         ax.invert_yaxis()
         ax.set_yticks([0.5 + i for i in range(len(differences))])
-        ax.set_xticks([0.5 + i for i in range(0, differences.shape[1] - 6, 5)])
-        ax.set_xticklabels(list(range(0, differences.shape[1] - 6, 5)))
+        ax.set_xticks([0.5 + i for i in range(0, differences.shape[1], 5)])
+        ax.set_xticklabels(list(range(0, differences.shape[1], 5)))
         ax.set_yticklabels(labels_anti)
         if not modelname:
             modelname = "GPT"
@@ -837,6 +844,7 @@ def plot_trace_heatmap(result, savepdf_pre=None, title=None, xlabel=None, modeln
             ax.set_title(f"Impact of restoring {kindname} after corrupted input")
             ax.set_xlabel(f"center of interval of {window} restored {kindname} layers")
         cb = plt.colorbar(h)
+        cb.set_label("Normalized indirect effect (NIE)")
         if title is not None:
             ax.set_title(title)
         if xlabel is not None:
@@ -865,15 +873,14 @@ def plot_trace_heatmap(result, savepdf_pre=None, title=None, xlabel=None, modeln
         fig, ax = plt.subplots(figsize=(3.5, 2), dpi=200)
         h = ax.pcolor(
             differences,
-            cmap={None: "Purples", "None": "Purples", "mlp": "Greens", "attn": "Reds"}[
-                kind
-            ],
-            vmin=low_score,
+            cmap="RdBu_r",
+            vmin=-color_limit,
+            vmax=color_limit,
         )
         ax.invert_yaxis()
         ax.set_yticks([0.5 + i for i in range(len(differences))])
-        ax.set_xticks([0.5 + i for i in range(0, differences.shape[1] - 6, 5)])
-        ax.set_xticklabels(list(range(0, differences.shape[1] - 6, 5)))
+        ax.set_xticks([0.5 + i for i in range(0, differences.shape[1], 5)])
+        ax.set_xticklabels(list(range(0, differences.shape[1], 5)))
         ax.set_yticklabels(labels_stereo)
         if not modelname:
             modelname = "GPT"
@@ -885,6 +892,7 @@ def plot_trace_heatmap(result, savepdf_pre=None, title=None, xlabel=None, modeln
             ax.set_title(f"Impact of restoring {kindname} after corrupted input")
             ax.set_xlabel(f"center of interval of {window} restored {kindname} layers")
         cb = plt.colorbar(h)
+        cb.set_label("Normalized indirect effect (NIE)")
         if title is not None:
             ax.set_title(title)
         if xlabel is not None:
@@ -925,22 +933,32 @@ def make_inputs(mt, prompts, labels, subject=None, device="cuda", blank_idxs=Non
             # truncation=True
     )
     if inputs['input_ids'].size()[1] != inputslabels['input_ids'].size()[1]:
+        print("Prompt and label token lengths differ")
         return None, None, None, None
 
     # assert inputs['input_ids'].size()[1] == inputslabels['input_ids'].size()[1], "inputs and labels should have the same length"
 
     subject_range = []
-    for subj in subject:
-        sr = find_token_range(mt.tokenizer, inputs["input_ids"][0], subj)
-        if sr is None: return None, None, None, None
+    for subj in subject or []:
+        sr = find_token_range(mt.tokenizer, inputs["input_ids"][0], subj, prompts[0])
+        if sr is None:
+            print(f"Subject {subj!r} was not found as a complete word in {prompts[0]!r}")
+            return None, None, None, None
         subject_range.append(sr)
 
-    inputs['labels'] = copy.deepcopy(inputs['input_ids'])
-    for idx in range(len(inputs['labels'])):
-        inputs['labels'][idx] = torch.where(inputs['input_ids'][idx] != mt.tokenizer.pad_token_id, inputs['input_ids'][idx], -100)  # ignore pad_tokens
-        inputs['labels'][idx][0] = -100         # ignore start marker / BOS
     if blank_idxs is None:
+        print(f"BLANK span was not verified for {prompts[0]!r}")
         return None, None, None, None   # no verified span -> skip sample
+    blank_start, blank_end = blank_idxs
+    if blank_start == 0:
+        print(f"BLANK starts at token 0 and cannot be scored by a causal LM: {prompts[0]!r}")
+        return None, None, None, None
+    if not 0 < blank_start < blank_end <= inputs['input_ids'].shape[1]:
+        print(f"BLANK span {blank_idxs} is outside the tokenized input: {prompts[0]!r}")
+        return None, None, None, None
+
+    inputs['labels'] = torch.full_like(inputs['input_ids'], -100)
+    inputs['labels'][:, blank_start:blank_end] = inputs['input_ids'][:, blank_start:blank_end]
     blank_token_idxs = blank_idxs       # from StereoSetDataset.word_span
     return inputs.to(device), subject_range, blank_token_idxs, inputslabels
 
@@ -953,27 +971,56 @@ def decode_tokens(tokenizer, token_array):
     return [tokenizer.decode([t]) for t in token_array]
 
 
-def find_token_range(tokenizer, token_array, substrings):    # find substring in token_array, return [start, end)
-    if substrings is None:
+def find_complete_word(text, substring):
+    if substring is None:
+        return None
+    return re.search(rf"(?<!\w){re.escape(substring)}(?!\w)", text)
+
+
+def find_token_range(tokenizer, token_array, substring, text=None):
+    """Locate the first complete-word occurrence and return its token range [start, end)."""
+    if substring is None:
         return None
 
+    if text is not None:
+        match = find_complete_word(text, substring)
+        if match is None:
+            return None
+        try:
+            encoded = tokenizer(text, return_offsets_mapping=True)
+            encoded_ids = encoded["input_ids"]
+            token_ids = token_array.tolist() if hasattr(token_array, "tolist") else list(token_array)
+            if encoded_ids != token_ids:
+                return None
+            token_idxs = [
+                idx for idx, (start, end) in enumerate(encoded["offset_mapping"])
+                if start < match.end() and end > match.start()
+            ]
+            if not token_idxs:
+                return None
+            return (token_idxs[0], token_idxs[-1] + 1)
+        except (NotImplementedError, TypeError):
+            pass
+
+    # Slow-tokenizer fallback: retain the existing decode mapping, but match a
+    # complete word instead of an arbitrary substring.
     toks = decode_tokens(tokenizer, token_array)
     whole_string = "".join(toks)
-
-    try:
-        char_loc = whole_string.index(substrings)
-    except ValueError:
+    match = find_complete_word(whole_string, substring)
+    if match is None:
         return None
 
     loc = 0
     tok_start, tok_end = None, None
     for i, t in enumerate(toks):
         loc += len(t)
-        if tok_start is None and loc > char_loc:
+        if tok_start is None and loc > match.start():
             tok_start = i
-        if tok_end is None and loc >= char_loc + len(substrings):
+        if tok_end is None and loc >= match.end():
             tok_end = i + 1
             break
+    if tok_start is None or tok_end is None:
+        return None
     return (tok_start, tok_end)
 
 

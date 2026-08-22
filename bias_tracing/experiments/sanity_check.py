@@ -106,7 +106,8 @@ check("CUDA available + device info", _cuda_check)
 print(f"\n[3/8] Loading models ...\n       source: {args.model_source}\n       target: {args.model_target}")
 
 from bias_trace import ModelAndTokenizer, layername, make_inputs, collect_embedding_std, \
-    calculate_hidden_flow, trace_with_patch, find_token_range, decode_tokens, _logits, causal_difference
+    calculate_hidden_flow, trace_with_patch, find_complete_word, find_token_range, \
+    decode_tokens, _logits, causal_difference
 
 def _load(name):
     mt = ModelAndTokenizer(name, torch_dtype=sanity_dtype(name))
@@ -200,25 +201,27 @@ check("BLANK span location (decode-back verified)", _blank_spans)
 
 def _subject_location():
     tok = mt_t.tokenizer
-    n_check, found, missed = min(20, len(ds)), 0, 0
+    n_check, found, missed, absent = min(20, len(ds)), 0, 0, 0
     for i in range(n_check):
         s = ds[i]
         ids = torch.tensor(tok(s["anti"])["input_ids"])
         for subj in s["subject"]:
-            if subj not in s["anti"]:
+            if find_complete_word(s["anti"], subj) is None:
+                absent += 1
                 continue
-            r = find_token_range(tok, ids, subj)
+            r = find_token_range(tok, ids, subj, s["anti"])
             found += int(r is not None)
             missed += int(r is None)
     # explicit multi-word test (flagged SentencePiece risk for gemma)
     mw_sent, mw_subj = "People from the Middle East are kind", "Middle East"
     mw_ids = torch.tensor(tok(mw_sent)["input_ids"])
-    mw = find_token_range(tok, mw_ids, mw_subj)
+    mw = find_token_range(tok, mw_ids, mw_subj, mw_sent)
     assert mw is not None, f"find_token_range failed on multi-word subject {mw_subj!r}"
     got = tok.decode(mw_ids[mw[0]:mw[1]]).strip()
     assert mw_subj in got, f"multi-word subject span decodes to {got!r}"
     assert found > 0 and missed == 0, f"subject location: found={found} missed={missed}"
-    print(f"         subjects located: {found}/{found + missed}; multi-word {mw_subj!r} -> {mw} ({got!r}) ✓")
+    print(f"         subjects located: {found}/{found + missed}; absent={absent}; "
+          f"multi-word {mw_subj!r} -> {mw} ({got!r}) ✓")
     return True
 
 check("subject location via find_token_range (incl. multi-word)", _subject_location)
@@ -229,8 +232,6 @@ print("\n[6/8] make_inputs + noise level ...")
 
 def _first_usable(dataset):
     for s in dataset:
-        if any(w not in s["anti"] or w not in s["stereo"] for w in s["subject"]):
-            continue
         ia = make_inputs(mt_t, prompts=[s["anti"]] * 2, labels=[s["anti_mask"]] * 2,
                          subject=s["subject"], blank_idxs=s.get("anti_blank_idxs"))
         is_ = make_inputs(mt_t, prompts=[s["stereo"]] * 2, labels=[s["stereo_mask"]] * 2,
@@ -253,6 +254,8 @@ def _inputs_detail():
         assert 0 <= b < e <= len(toks), f"subject range {b, e} out of bounds"
     b, e = bi_a
     assert 0 <= b < e <= len(toks), f"blank range {b, e} out of bounds"
+    scored = torch.where(inp_a["labels"][0] != -100)[0].tolist()
+    assert scored == list(range(b, e)), f"labels score {scored}, expected BLANK span {b, e}"
     return True
 
 check("ranges in bounds", _inputs_detail)
@@ -310,9 +313,6 @@ traced, skipped = 0, 0
 for knowledge in ds:
     if traced >= args.n_samples:
         break
-    if any(w not in knowledge["anti"] or w not in knowledge["stereo"] for w in knowledge["subject"]):
-        skipped += 1
-        continue
     ia = make_inputs(mt_t, prompts=[knowledge["anti"]] * 2, labels=[knowledge["anti_mask"]] * 2,
                      subject=knowledge["subject"], blank_idxs=knowledge.get("anti_blank_idxs"))
     is_ = make_inputs(mt_t, prompts=[knowledge["stereo"]] * 2, labels=[knowledge["stereo_mask"]] * 2,
@@ -353,7 +353,13 @@ if args.coverage:
         usable, skipped_ids = 0, []
         for i in range(len(dds)):
             s = dds[i]
-            ok = all(w in s["anti"] and w in s["stereo"] for w in s["subject"])
+            anti_ids = torch.tensor(tok(s["anti"])["input_ids"])
+            stereo_ids = torch.tensor(tok(s["stereo"])["input_ids"])
+            ok = all(
+                find_token_range(tok, anti_ids, word, s["anti"]) is not None and
+                find_token_range(tok, stereo_ids, word, s["stereo"]) is not None
+                for word in s["subject"]
+            )
             if ok and dds.use_empirical_blank:
                 ok = s.get("anti_blank_idxs") is not None and s.get("stereo_blank_idxs") is not None
             if ok:

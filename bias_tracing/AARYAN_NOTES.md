@@ -128,11 +128,14 @@ and reports PASS/FAIL for each. Writes to `results/sanity_check/` only — never
 
 ```bash
 cd bias_tracing
-python fig.py --model_name OLMo-2-0425-1B --bias gender
+python fig.py \
+    --root results/cross_patch/{direction}/{domain}/causal_trace/cases \
+    --bias gender
 # or: --bias race / profession / religion
 ```
 
-Plots are saved as PNG to `results/<model_name>-<bias>-states.png` and `results/<model_name>-<bias>-words.png`.
+Plots are saved as PNG to `results/<source>_to_<target>-<bias>-states.png` and
+`results/<source>_to_<target>-<bias>-words.png`.
 
 ### Reading the run log
 

@@ -42,8 +42,8 @@ class StereoSetDataset(Dataset):
             raise Exception("No blank word found.")
 
         def clean(sentence):
-            # the word that filled BLANK, punctuation stripped ("chief." -> "chief")
-            return sentence.split(" ")[word_idx].translate(str.maketrans('', '', string.punctuation))
+            # Strip punctuation around the fill while preserving internal punctuation.
+            return sentence.split(" ")[word_idx].strip(string.punctuation)
 
         def word_span(sentence):
             """(start, end) token span of the fill word; None (=skip) if unverifiable.
@@ -60,7 +60,19 @@ class StereoSetDataset(Dataset):
             start = len(self.tokenizer(prefix)["input_ids"])
             end = len(self.tokenizer(prefix + sep + word)["input_ids"])
             full = self.tokenizer(sentence)["input_ids"]
-            if end > len(full) or self.tokenizer.decode(full[start:end]).strip() != word:
+
+            if end > len(full):
+                print(f"Skipping {obj['id']}: cannot verify BLANK span in {sentence!r}")
+                return None
+
+            # Some tokenizers emit a standalone whitespace token before the word.
+            while start < end and not self.tokenizer.decode(full[start:start + 1]).strip():
+                start += 1
+            while start < end and not self.tokenizer.decode(full[end - 1:end]).strip():
+                end -= 1
+
+            if self.tokenizer.decode(full[start:end]).strip() != word:
+                print(f"Skipping {obj['id']}: cannot verify BLANK span in {sentence!r}")
                 return None
             # proof ran in raw coords; return in model-input coords (+marker offset)
             return (start + self._span_offset, end + self._span_offset)
