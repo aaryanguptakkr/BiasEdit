@@ -87,7 +87,7 @@ from plot_utils import (
     BASE_COLOR, INSTRUCT_COLOR, LOW_SIG_COLOR, LOW_SIG_BG,
     local_cases_dir, zip_cases_prefix, partition_names, subsample_aligned,
     load_npz_local, load_npz_zip,
-    collect_scores, _draw_bars, _savepdf,
+    collect_scores, _draw_bars, _savepdf, normalized_indirect_effect,
 )
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -320,10 +320,9 @@ def save_stats_and_report(model_name, all_ckpt_stats, out_dir):
             flag = ' ⚠' if gap < LOW_SIGNAL else ''
             nl   = s['num_layers']
             mid  = nl // 2
-            def nie(v): return (v - low) / gap if gap > 0 else 0.0
-            nie_l0   = nie(s['states_nie'][0])
-            nie_lmid = nie(s['states_nie'][mid])
-            nie_last = nie(s['states_nie'][-1])
+            nie_l0   = normalized_indirect_effect(s['states_nie'][0],   low, gap, degenerate='zero')
+            nie_lmid = normalized_indirect_effect(s['states_nie'][mid], low, gap, degenerate='zero')
+            nie_last = normalized_indirect_effect(s['states_nie'][-1],  low, gap, degenerate='zero')
             lines.append(
                 f"| {e['label']} | {domain}{flag} | {s['n_cases']} | {gap:.4f} "
                 f"| {s['peak_layer_states']} | {s['peak_layer_mlp']} | {s['peak_layer_attn']} "
@@ -359,10 +358,7 @@ def save_stats_and_report(model_name, all_ckpt_stats, out_dir):
                 gap  = s['effect_gap']
                 low  = s['mean_low']
                 flag = '  ⚠ low-signal' if gap < LOW_SIGNAL else ''
-                if gap > 0:
-                    nie_vals = [(v - low) / gap for v in s['states_nie']]
-                else:
-                    nie_vals = [0.0] * nl
+                nie_vals = normalized_indirect_effect(s['states_nie'], low, gap, degenerate='zero')
                 vals = ' | '.join(f'{v:+.2f}' for v in nie_vals)
                 lines.append(f'| {domain}{flag} | {vals} |')
         lines.append('')
@@ -500,7 +496,7 @@ def save_bias_trajectory(base_stats, instruct_stats, out_dir):
                 continue
             gap    = s['effect_gap']
             raw_l0 = s['states_nie'][0]
-            frac_l0 = (raw_l0 - s['mean_low']) / gap if gap > 0 else float('nan')
+            frac_l0 = normalized_indirect_effect(raw_l0, s['mean_low'], gap, degenerate='nan')
             base_pts.append((e['label'], gap, frac_l0, raw_l0, gap < LOW_SIGNAL))
 
         for e in instruct_stats:
@@ -509,7 +505,7 @@ def save_bias_trajectory(base_stats, instruct_stats, out_dir):
                 continue
             gap    = s['effect_gap']
             raw_l0 = s['states_nie'][0]
-            frac_l0 = (raw_l0 - s['mean_low']) / gap if gap > 0 else float('nan')
+            frac_l0 = normalized_indirect_effect(raw_l0, s['mean_low'], gap, degenerate='nan')
             instruct_pts.append((e['label'], gap, frac_l0, raw_l0, gap < LOW_SIGNAL))
 
         if not base_pts and not instruct_pts:
@@ -1497,13 +1493,12 @@ def save_appendix_A3_nie_lines(out_dir, num_sample=None, main_zf=None):
             'pre_blank': 'pre_blank_mean',
             'blank':     'blank_mean',
         }
-        if res is None or res['effect_gap'] <= 0:
+        if res is None:
             return None
         arr = res.get(key_map[key])
         if arr is None:
             return None
-        arr = np.array(arr) if not isinstance(arr, np.ndarray) else arr
-        return (arr - res['mean_low']) / res['effect_gap']
+        return normalized_indirect_effect(arr, res['mean_low'], res['effect_gap'])   # None if gap <= 0
 
     # compute Y ranges separately for states rows and words rows
     states_vals, words_vals = [], []
@@ -1646,10 +1641,9 @@ def save_main_body_nie_overlay(out_dir, num_sample=None, main_zf=None):
 
     def _nie(res, key):
         key_map = {'states_nie': 'bias_mean', 'mlp_nie': 'mlp_mean', 'attn_nie': 'attn_mean'}
-        if res is None or res['effect_gap'] <= 0:
+        if res is None:
             return None
-        arr = np.array(res[key_map[key]])
-        return (arr - res['mean_low']) / res['effect_gap']
+        return normalized_indirect_effect(res[key_map[key]], res['mean_low'], res['effect_gap'])   # None if gap <= 0
 
     all_vals = []
     for key in NIE_KEYS:
@@ -1748,10 +1742,9 @@ def save_main_body_pre_post_crosspatch(out_dir, num_sample=None, main_zf=None):
 
     def _nie(res, key):
         key_map = {'bias': 'bias_mean', 'mlp': 'mlp_mean', 'attn': 'attn_mean'}
-        if res is None or res['effect_gap'] <= 0:
+        if res is None:
             return None
-        arr = np.array(res[key_map[key]])
-        return (arr - res['mean_low']) / res['effect_gap']
+        return normalized_indirect_effect(res[key_map[key]], res['mean_low'], res['effect_gap'])   # None if gap <= 0
 
     # (a) within-model overlay: 3 conditions, Pre solid / Post dashed
     COND_KEYS   = ('bias', 'mlp', 'attn')
@@ -1890,13 +1883,12 @@ def save_crosspatch_nie_overlay(out_dir, num_sample=None, main_zf=None):
     def _nie(res, key):
         key_map = {'bias': 'bias_mean', 'mlp': 'mlp_mean', 'attn': 'attn_mean',
                    'pre_blank': 'pre_blank_mean', 'blank': 'blank_mean'}
-        if res is None or res['effect_gap'] <= 0:
+        if res is None:
             return None
         arr = res.get(key_map[key])
         if arr is None:
             return None
-        arr = np.array(arr) if not isinstance(arr, np.ndarray) else arr
-        return (arr - res['mean_low']) / res['effect_gap']
+        return normalized_indirect_effect(arr, res['mean_low'], res['effect_gap'])   # None if gap <= 0
 
     states_vals, words_vals = [], []
     for results_dict in (pre_results, post_results, p2post_results, p2pre_results):
@@ -2171,10 +2163,7 @@ def save_appendix_A6_heatmap(base_stats, instruct_stats, out_dir, num_sample=Non
             step2000_local[domain] = res
 
     def _to_nie(alp_arr, mean_low, effect_gap):
-        """NIE = (alp - mean_low) / effect_gap  (same formula as A3 _nie helper)."""
-        if effect_gap <= 0:
-            return np.zeros_like(np.array(alp_arr, dtype=float))
-        return (np.array(alp_arr, dtype=float) - mean_low) / effect_gap
+        return normalized_indirect_effect(alp_arr, mean_low, effect_gap, degenerate='zero')
 
     def _get_from_stats(stats_list, domain, key):
         """Return [(label, nie_array)] normalizing stored raw ALP to NIE."""

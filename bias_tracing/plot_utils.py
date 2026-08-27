@@ -161,7 +161,15 @@ BAR_WIDTH = 0.25
 BIAS_TYPES    = ['gender', 'profession', 'race', 'religion']
 PAPER_DOMAINS = ['gender', 'race', 'profession']  # domains used in paper figures (no religion)
 
-LOW_SIGNAL = 0.03  # effect_gap below this → ⚠ marker; tracing estimates unreliable
+# Display heuristic (not a statistical test): panels whose effect_gap falls below
+# this get a ⚠ marker, because NIE divides by the gap and small gaps blow the
+# ratio far outside its interpretable [0, 1] range. Measured over the 68
+# (model, checkpoint, domain) entries in plots/*/stats.json: gap ≈ 0.12 → max|NIE|
+# 0.24–0.56, whereas gap = 0.0056 → 9.98 and gap = 0.0142 → 4.12. The cut is a
+# round number, not a derived bound — it flags 7 of the 9 entries with
+# max|NIE| > 1.5 and also flags 8 well-behaved ones. Nothing is excluded from any
+# computation; see normalized_indirect_effect() for the degenerate-gap policy.
+LOW_SIGNAL = 0.03
 
 STATES_LABELS = [
     'Effect of single state',
@@ -181,6 +189,41 @@ WORDS_COLORS  = ['#9467bd', '#ff7f0e', '#17becf']  # distinct palette for words 
 
 Y_LABEL_BARS = 'Abs. log prob diff (stereo − anti)'
 Y_LABEL_NIE  = 'NIE (normalized indirect effect)'
+
+
+# ── normalized indirect effect ────────────────────────────────────────────────
+
+def normalized_indirect_effect(values, mean_low, effect_gap, degenerate='skip'):
+    """Normalized Indirect Effect — the single definition used by every plot.
+
+        NIE = (restoration_score − low_score) / (high_score − low_score)
+
+    with effect_gap = high_score − low_score, so NIE = 1 is full recovery of the
+    clean-vs-corrupted signal and NIE = 0 is none. Convention follows Sen Sharma
+    et al. (COLM 2024) Eq. 7 and Zhang & Nanda (ICLR 2024); tracing protocol from
+    Meng et al. (2022).
+
+    NIE is undefined when effect_gap <= 0 — the denominator vanishes, or goes
+    negative (corruption *raised* the score), which silently inverts the scale.
+    Callers pick that behaviour explicitly rather than inheriting a default:
+
+        'skip' → None                    caller drops the series
+        'zero' → 0.0 / zeros(shape)      renders as "no effect"
+        'nan'  → nan / full(shape, nan)  renders as a gap
+
+    A non-finite gap also takes the degenerate branch. Scalars return floats;
+    lists and arrays return an ndarray of the same shape. The input dtype is
+    preserved — the cached score arrays are float32, and promoting them to
+    float64 here would shift every plotted value by ~1e-7.
+    """
+    scalar = np.ndim(values) == 0
+    if effect_gap > 0:
+        out = (np.asarray(values) - mean_low) / effect_gap
+        return float(out) if scalar else out
+    if degenerate == 'skip':
+        return None
+    fill = 0.0 if degenerate == 'zero' else float('nan')
+    return fill if scalar else np.full(np.shape(values), fill, dtype=float)
 
 # ── data path helpers ─────────────────────────────────────────────────────────
 

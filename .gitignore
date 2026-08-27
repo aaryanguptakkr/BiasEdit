@@ -1,6 +1,9 @@
 # Notes
 bias_tracing/STORY.md
 
+# Local-only: holds personal paths/names (see plot_utils.py)
+bias_tracing/private_names.py
+
 # Generated results
 bias_tracing/results/
 bias_tracing/logs/
