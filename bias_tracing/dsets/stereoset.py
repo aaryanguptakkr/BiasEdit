@@ -56,6 +56,11 @@ class StereoSetDataset(Dataset):
                 return None
             prefix = " ".join(words[:word_idx])
             word = clean(sentence)
+            # Hyphens/apostrophes are real word-internal characters ("co-worker", "nurse's");
+            # any other internal punctuation is a data-entry artifact ("very`quiet", "kind!p").
+            if any(c in string.punctuation and c not in "-'" for c in word):
+                print(f"Skipping {obj['id']}: fill word {word!r} is a data-entry artifact")
+                return None
             sep = " " if word_idx > 0 else ""   # space rides WITH the word (byte-BPE fuses it)
             start = len(self.tokenizer(prefix)["input_ids"])
             end = len(self.tokenizer(prefix + sep + word)["input_ids"])

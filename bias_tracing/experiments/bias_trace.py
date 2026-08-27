@@ -25,6 +25,15 @@ from util import nethook
 from tqdm import tqdm
 
 SCORE_METRIC = "blank_logprob_stereo_minus_anti_v1"
+SCORE_METRIC_SENTENCE = "sentence_logprob_stereo_minus_anti_v1"   # |value| == legacy whole-sentence abs metric
+
+
+def sentence_labels(inp, pad_id):
+    """Whole-sentence labels (legacy scoring span): every real token except position 0."""
+    ids = inp["input_ids"]
+    labels = ids.clone() if pad_id is None else torch.where(ids != pad_id, ids, torch.full_like(ids, -100))
+    labels[:, 0] = -100     # start marker / BOS
+    return labels
 
 
 def main():
@@ -177,13 +186,16 @@ def main():
         if inp_anti["input_ids"].shape[1] != inp_stereo["input_ids"].shape[1]:
             print(f"Skipping {known_id}: anti/stereo token lengths differ")
             continue
+        sl_anti = sentence_labels(inp_anti, mt_target.tokenizer.pad_token_id)
+        sl_stereo = sentence_labels(inp_stereo, mt_target.tokenizer.pad_token_id)
         with torch.no_grad():
             pred_anti = _logits(mt_target.model(**inp_anti))
             targ_anti = inp_anti["labels"]
             pred_stereo = _logits(mt_target.model(**inp_stereo))
             targ_stereo = inp_stereo["labels"]
             base_score = causal_difference(pred_anti, targ_anti, pred_stereo, targ_stereo)
-            print(base_score)
+            base_score_sentence = causal_difference(pred_anti, sl_anti, pred_stereo, sl_stereo)
+            print(base_score, base_score_sentence)
         
         # Preference after corrupting the subject embeddings.
         anti_outputs = trace_with_patch(
@@ -211,8 +223,9 @@ def main():
         pred_stereo = _logits(stereo_outputs)
         targ_stereo = inp_stereo["labels"]
 
-        # Corrupted target-model preference at the BLANK fill, corrupted rows only.
+        # Corrupted target-model preference, corrupted rows only (both scoring spans).
         low_score = causal_difference(pred_anti[1:], targ_anti[1:], pred_stereo[1:], targ_stereo[1:])
+        low_score_sentence = causal_difference(pred_anti[1:], sl_anti[1:], pred_stereo[1:], sl_stereo[1:])
 
         for kind in None, "mlp", "attn":
             print(f"Causal Tracing for {known_id} {kind} ==========================================================")
@@ -230,7 +243,10 @@ def main():
                         cached_target == args.model_target):
                     numpy_result = cached_result
                 else:
-                    print(f"Recomputing {filename}: cached metric or direction is stale")
+                    raise RuntimeError(
+                        f"Refusing to overwrite {filename}: it was produced under a different "
+                        f"metric/direction (metric={cached_metric or 'legacy'}). "
+                        f"Old results are never overwritten — use a fresh --output_dir.")
 
             if numpy_result is None:
                 result = calculate_hidden_flow(
@@ -256,6 +272,10 @@ def main():
                 result["high_score"] = base_score
                 result["low_score"] = low_score
                 result["nie"] = normalized_indirect_effect(result["scores"], base_score, low_score)
+                result["high_score_sentence"] = base_score_sentence
+                result["low_score_sentence"] = low_score_sentence
+                result["nie_sentence"] = normalized_indirect_effect(
+                    result["scores_sentence"], base_score_sentence, low_score_sentence)
                 numpy_result = {
                     # MODIFIED: to prevent unsupported ScalarType BFloat16 in numpy cast to float32 first
                     k: v.detach().to(torch.float32).cpu().numpy() if torch.is_tensor(v) else v
@@ -507,10 +527,10 @@ def calculate_hidden_flow(
     # difference after corrupting embedding and restoring
     
     if not kind:
-        differences = trace_important_states(
+        differences, differences_sentence = trace_important_states(
             mt_source,
             mt_target,
-            inp_anti, inp_stereo, 
+            inp_anti, inp_stereo,
             e_range_anti, e_range_stereo,
             blank_idxs_anti, blank_idxs_stereo,
             noise=noise,
@@ -519,7 +539,7 @@ def calculate_hidden_flow(
             # token_range=token_range,
         )
     else:
-        differences = trace_important_window(
+        differences, differences_sentence = trace_important_window(
             mt_source,
             mt_target,
             inp_anti, inp_stereo,
@@ -533,9 +553,12 @@ def calculate_hidden_flow(
             # token_range=token_range,
         )
     differences = differences.detach().cpu()                            #(seq_len, num_layers)
+    differences_sentence = differences_sentence.detach().cpu()
     return dict(
         scores=differences,
+        scores_sentence=differences_sentence,
         score_metric=SCORE_METRIC,
+        score_metric_sentence=SCORE_METRIC_SENTENCE,
         case_id=knowledge["id"],
         source_model=mt_source.model_name,
         target_model=mt_target.model_name,
@@ -577,10 +600,14 @@ def trace_important_states(
     # token_range_stereo = list(set(range(ntoks_stereo)) - set(blank_idxs_stereo))
     # assert len(token_range_stereo) == len(token_range_anti), "After remove blank tokens, anti and stereo should have the same length"
     
+    sl_anti = sentence_labels(inp_anti, mt_target.tokenizer.pad_token_id)
+    sl_stereo = sentence_labels(inp_stereo, mt_target.tokenizer.pad_token_id)
     table = [] # (num_layers, seq_len)
+    table_sentence = []
 
     for tnum in range(ntoks_anti):
         row = []
+        row_sentence = []
         for layer in range(mt_target.num_layers):
             anti_outputs = trace_with_patch(
                 model_source=mt_source.model,
@@ -607,11 +634,14 @@ def trace_important_states(
             pred_stereo = _logits(stereo_outputs)
             targ_stereo = inp_stereo["labels"]
 
-            # sentence log-prob gap on the corrupted rows
+            # log-prob gap on the corrupted rows, both scoring spans (same logits)
             r = causal_difference(pred_anti[1:], targ_anti[1:], pred_stereo[1:], targ_stereo[1:])
+            r_sent = causal_difference(pred_anti[1:], sl_anti[1:], pred_stereo[1:], sl_stereo[1:])
             row.append(r)
+            row_sentence.append(r_sent)
         table.append(torch.stack(row))
-    return torch.stack(table)
+        table_sentence.append(torch.stack(row_sentence))
+    return torch.stack(table), torch.stack(table_sentence)
 
 
 def trace_important_window(
@@ -636,9 +666,13 @@ def trace_important_window(
     # token_range_stereo = list(set(range(ntoks_stereo)) - set(blank_idxs_stereo))
     # assert len(token_range_stereo) == len(token_range_anti), "After remove blank tokens, anti and stereo should have the same length"
     
+    sl_anti = sentence_labels(inp_anti, mt_target.tokenizer.pad_token_id)
+    sl_stereo = sentence_labels(inp_stereo, mt_target.tokenizer.pad_token_id)
     table = [] # (num_layers, seq_len)
+    table_sentence = []
     for tnum in range(ntoks_anti):
         row = []
+        row_sentence = []
         for layer in range(mt_target.num_layers):
             layerlist_anti = [
                 (tnum, layername(mt_target.model, L, kind))
@@ -678,11 +712,14 @@ def trace_important_window(
             targ_anti = inp_anti["labels"]
             pred_stereo = _logits(stereo_outputs)
             targ_stereo = inp_stereo["labels"]
-            # sentence log-prob gap on the corrupted rows
+            # log-prob gap on the corrupted rows, both scoring spans (same logits)
             r = causal_difference(pred_anti[1:], targ_anti[1:], pred_stereo[1:], targ_stereo[1:])
+            r_sent = causal_difference(pred_anti[1:], sl_anti[1:], pred_stereo[1:], sl_stereo[1:])
             row.append(r)
+            row_sentence.append(r_sent)
         table.append(torch.stack(row))
-    return torch.stack(table)
+        table_sentence.append(torch.stack(row_sentence))
+    return torch.stack(table), torch.stack(table_sentence)
 
 
 class ModelAndTokenizer:
