@@ -24,8 +24,15 @@ from dsets import StereoSetDataset
 from util import nethook
 from tqdm import tqdm
 
-SCORE_METRIC = "blank_logprob_stereo_minus_anti_v1"
-SCORE_METRIC_SENTENCE = "sentence_logprob_stereo_minus_anti_v1"   # |value| == legacy whole-sentence abs metric
+# Three readings of the same forward passes. `scores`/`high_score`/`low_score` hold the
+# FIRST one, so those keys mean exactly what they mean in every pre-2026-08 result file.
+SCORE_METRIC        = "sentence_abs_logprob_diff_v1"      # |stereo - anti|, whole sentence  <- reported metric
+SCORE_METRIC_SIGNED = "sentence_signed_logprob_diff_v1"   # stereo - anti, whole sentence; abs() of it == SCORE_METRIC
+SCORE_METRIC_BLANK  = "blank_signed_logprob_diff_v1"      # stereo - anti, BLANK tokens only
+
+# Keep the two chains apart: an NIE must take its scores, high and low from ONE of them.
+# Absolute answers "how much differentiation is restored", signed answers "is the same
+# direction restored". Mixing them produces a meaningless number.
 
 
 def sentence_labels(inp, pad_id):
@@ -193,9 +200,10 @@ def main():
             targ_anti = inp_anti["labels"]
             pred_stereo = _logits(mt_target.model(**inp_stereo))
             targ_stereo = inp_stereo["labels"]
-            base_score = causal_difference(pred_anti, targ_anti, pred_stereo, targ_stereo)
-            base_score_sentence = causal_difference(pred_anti, sl_anti, pred_stereo, sl_stereo)
-            print(base_score, base_score_sentence)
+            base_score_blank = causal_difference(pred_anti, targ_anti, pred_stereo, targ_stereo)
+            base_score_signed = causal_difference(pred_anti, sl_anti, pred_stereo, sl_stereo)
+            base_score = torch.abs(base_score_signed)          # reported metric
+            print(base_score, base_score_signed, base_score_blank)
         
         # Preference after corrupting the subject embeddings.
         anti_outputs = trace_with_patch(
@@ -223,9 +231,10 @@ def main():
         pred_stereo = _logits(stereo_outputs)
         targ_stereo = inp_stereo["labels"]
 
-        # Corrupted target-model preference, corrupted rows only (both scoring spans).
-        low_score = causal_difference(pred_anti[1:], targ_anti[1:], pred_stereo[1:], targ_stereo[1:])
-        low_score_sentence = causal_difference(pred_anti[1:], sl_anti[1:], pred_stereo[1:], sl_stereo[1:])
+        # Corrupted target-model preference, corrupted rows only (all three readings).
+        low_score_blank = causal_difference(pred_anti[1:], targ_anti[1:], pred_stereo[1:], targ_stereo[1:])
+        low_score_signed = causal_difference(pred_anti[1:], sl_anti[1:], pred_stereo[1:], sl_stereo[1:])
+        low_score = torch.abs(low_score_signed)             # reported metric
 
         for kind in None, "mlp", "attn":
             print(f"Causal Tracing for {known_id} {kind} ==========================================================")
@@ -269,13 +278,20 @@ def main():
                 if not result:
                     print(f"Skipping {knowledge['id']}")
                     continue
+                # reported chain (absolute) — same meaning as every pre-2026-08 result file
                 result["high_score"] = base_score
                 result["low_score"] = low_score
-                result["nie"] = normalized_indirect_effect(result["scores"], base_score, low_score)
-                result["high_score_sentence"] = base_score_sentence
-                result["low_score_sentence"] = low_score_sentence
-                result["nie_sentence"] = normalized_indirect_effect(
-                    result["scores_sentence"], base_score_sentence, low_score_sentence)
+                # signed chain — direction of restoration; abs() of these gives the chain above
+                result["high_score_signed"] = base_score_signed
+                result["low_score_signed"] = low_score_signed
+                # BLANK-only chain (fill word alone); undefined when the BLANK precedes the subject
+                result["high_score_blank"] = base_score_blank
+                result["low_score_blank"] = low_score_blank
+                # PER-CASE NIE, for the per-case heatmap PDF only. NOT a reportable quantity:
+                # each case divides by its own gap, which is <=0 for ~40% of cases and near zero
+                # for many more (std 2.1, range -7.5..+17). Aggregate first, then divide instead.
+                result["nie_percase_diagnostic"] = normalized_indirect_effect(
+                    result["scores"], base_score, low_score)
                 numpy_result = {
                     # MODIFIED: to prevent unsupported ScalarType BFloat16 in numpy cast to float32 first
                     k: v.detach().to(torch.float32).cpu().numpy() if torch.is_tensor(v) else v
@@ -555,10 +571,12 @@ def calculate_hidden_flow(
     differences = differences.detach().cpu()                            #(seq_len, num_layers)
     differences_sentence = differences_sentence.detach().cpu()
     return dict(
-        scores=differences,
-        scores_sentence=differences_sentence,
+        scores=torch.abs(differences_sentence),   # reported metric, legacy-compatible
+        scores_signed=differences_sentence,
+        scores_blank=differences,
         score_metric=SCORE_METRIC,
-        score_metric_sentence=SCORE_METRIC_SENTENCE,
+        score_metric_signed=SCORE_METRIC_SIGNED,
+        score_metric_blank=SCORE_METRIC_BLANK,
         case_id=knowledge["id"],
         source_model=mt_source.model_name,
         target_model=mt_target.model_name,
@@ -836,7 +854,7 @@ def layername(model, num, kind=None):
 
 
 def plot_trace_heatmap(result, savepdf_pre=None, title=None, xlabel=None, modelname=None):
-    differences = result["nie"]
+    differences = result["nie_percase_diagnostic"]
     color_limit = numpy.nanmax(numpy.abs(differences))
     if not numpy.isfinite(color_limit) or color_limit == 0:
         color_limit = 1.0
