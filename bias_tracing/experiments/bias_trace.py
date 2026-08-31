@@ -99,6 +99,12 @@ def main():
             "google/gemma-3-1b-it",
         ],
     )
+    # Within-model shorthands, kept so the pre-merge scripts (scripts/olmo_all.sh,
+    # scripts/gpt2m.sh) still run unchanged:
+    #   --model_name X == --model_source X --model_target X
+    #   --branch R     == --branch1 R --branch2 R
+    aa("--model_name", default=None)
+    aa("--branch", default=None)
     aa("--branch1", default=None)
     aa("--branch2", default=None)
     aa("--bias_file", default="data/domain/gender.json")
@@ -110,9 +116,18 @@ def main():
     aa("--samples", default=10, type=int)
     args = parser.parse_args()
 
+    if args.model_name is not None:
+        args.model_source = args.model_target = args.model_name
+    if args.branch is not None:
+        args.branch1 = args.branch2 = args.branch
+
     model_base_source = args.model_source.split("/")[-1]
     model_base_target = args.model_target.split("/")[-1]
-    model_base = f"{model_base_source}_to_{model_base_target}"
+    # `--model_name` keeps the pre-merge single-model naming so its default output path and
+    # run_log label are unchanged. Explicit --model_source X --model_target X (as in
+    # scripts/checkpoints_sweep.sh) keeps the X_to_X form its existing runs were logged under.
+    model_base = (model_base_source if args.model_name is not None
+                  else f"{model_base_source}_to_{model_base_target}")
     modeldir = f'r{args.replace}_{model_base.replace("/", "_")}'
     modeldir = f"n{args.noise_level}_" + modeldir + f"_{args.bias_file.split('/')[-1].split('.')[0]}"
     output_dir = args.output_dir.format(model_name=modeldir, model_base=model_base)
