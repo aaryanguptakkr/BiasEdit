@@ -28,8 +28,17 @@ class StereoSetDataset(Dataset):
             self._span_offset = len(tokenizer(marker, add_special_tokens=False)["input_ids"])
 
         data = json.load(open(data_path))
-        self.data = [{k: d[k] for k in ["id", "target", "bias_type", "context", "data", "subject"]}
-                     for d in data]
+        fields = ["id", "target", "bias_type", "context", "data", "subject"]
+        self.data = []
+        for d in data:
+            blank_count = sum("BLANK" in word for word in d["context"].split(" "))
+            if blank_count != 1:
+                print(
+                    f"Skipping {d['id']}: expected exactly one BLANK, "
+                    f"found {blank_count}"
+                )
+                continue
+            self.data.append({k: d[k] for k in fields})
         print(f"Loaded dataset with {len(self)} elements")
 
     def __len__(self):

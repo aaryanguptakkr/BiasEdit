@@ -34,14 +34,15 @@ from plot_utils import (
     FIG_GRID_W_PER_COL, FIG_ROW_H, FIG_LINE_W_PER_PAN, FIG_TRAJ_H,
     BASE_COLOR, INSTRUCT_COLOR, LOW_SIG_COLOR, LOW_SIG_BG,
     _draw_bars, _savepdf,
-    collect_scores, load_npz_local, load_npz_zip, partition_names,
+    collect_scores, load_npz_local, load_npz_zip, partition_names, subsample_aligned,
     zip_cases_prefix, local_cases_dir, ZIP_PATH, MAIN_ZIP,
+    SCORE_METRIC, validate_score_files, normalize_stats_score_fields,
 )
 
 PANELS = [
-    ('states_nie', 'Effect of single state'),
-    ('mlp_nie',    'Effect with Attn severed'),
-    ('attn_nie',   'Effect with MLP severed'),
+    ('states_score', 'Effect of single state'),
+    ('mlp_score',    'Effect with Attn severed'),
+    ('attn_score',   'Effect with MLP severed'),
 ]
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -63,6 +64,8 @@ def _load(model):
     org = cfg.get('org', '')
     label_to_dir = {lbl: d for d, lbl in cfg.get('checkpoints', [])}
     for entry in data:
+        for stats in entry['domains'].values():
+            normalize_stats_score_fields(stats)
         ck_dir = label_to_dir.get(entry['label'])
         if ck_dir is None:
             continue
@@ -129,6 +132,7 @@ def _npz_domain_stats(model, org, checkpoint_dir, domain, source='zip'):
         names  = [n for n in zf.namelist() if n.startswith(prefix) and n.endswith('.npz')]
         all_basenames = [os.path.basename(n) for n in names]
         single, attn, mlp = partition_names(all_basenames)
+        single, attn, mlp = subsample_aligned(single, attn, mlp, None)
         single_set, attn_set, mlp_set = set(single), set(attn), set(mlp)
         file_list        = [prefix + b for b in all_basenames if b in single_set]
         file_list_attn   = [prefix + b for b in all_basenames if b in attn_set]
@@ -140,6 +144,7 @@ def _npz_domain_stats(model, org, checkpoint_dir, domain, source='zip'):
         names  = [n for n in zf.namelist() if n.startswith(prefix) and n.endswith('.npz')]
         all_basenames = [os.path.basename(n) for n in names]
         single, attn, mlp = partition_names(all_basenames)
+        single, attn, mlp = subsample_aligned(single, attn, mlp, None)
         single_set, attn_set, mlp_set = set(single), set(attn), set(mlp)
         file_list        = [prefix + b for b in all_basenames if b in single_set]
         file_list_attn   = [prefix + b for b in all_basenames if b in attn_set]
@@ -151,6 +156,7 @@ def _npz_domain_stats(model, org, checkpoint_dir, domain, source='zip'):
             return None
         fnames = [f for f in os.listdir(d) if f.endswith('.npz')]
         single, attn, mlp = partition_names(fnames)
+        single, attn, mlp = subsample_aligned(single, attn, mlp, None)
         file_list       = [os.path.join(d, f) for f in single]
         file_list_attn  = [os.path.join(d, f) for f in attn]
         file_list_mlp   = [os.path.join(d, f) for f in mlp]
@@ -158,31 +164,45 @@ def _npz_domain_stats(model, org, checkpoint_dir, domain, source='zip'):
 
     if not file_list:
         return None
+    expected_model = f'{org}/{model}'
+    expected = {
+        'score_metric': SCORE_METRIC,
+        'source_model': expected_model,
+        'target_model': expected_model,
+        'direction': f'{expected_model} -> {expected_model}',
+    }
+    try:
+        validate_score_files(
+            (file_list, file_list_attn, file_list_mlp), loader, expected
+        )
+    except ValueError as ex:
+        print(f'  Invalid NPZ set for {model}/{checkpoint_dir}/{domain}: {ex}')
+        return None
 
     bm, bp, bbl, n, mh, ml = collect_scores(file_list, loader)
     if bm is None:
         return None
 
-    # MLP-severed restore (Attn severed = mlp_nie)
-    mlp_nie = bm.tolist()
+    # MLP-only restore (attention severed).
+    mlp_score = bm.tolist()
     if file_list_mlp:
         mlp_bm, _, _, _, _, _ = collect_scores(file_list_mlp, loader)
         if mlp_bm is not None:
-            mlp_nie = mlp_bm.tolist()
+            mlp_score = mlp_bm.tolist()
 
-    # Attn-severed restore (MLP severed = attn_nie)
-    attn_nie = bm.tolist()
+    # Attention-only restore (MLP severed).
+    attn_score = bm.tolist()
     if file_list_attn:
         attn_bm, _, _, _, _, _ = collect_scores(file_list_attn, loader)
         if attn_bm is not None:
-            attn_nie = attn_bm.tolist()
+            attn_score = attn_bm.tolist()
 
     return {
-        'states_nie':    bm.tolist(),
-        'pre_blank_nie': bp.tolist(),
-        'blank_nie':     bbl.tolist(),
-        'mlp_nie':       mlp_nie,
-        'attn_nie':      attn_nie,
+        'states_score':    bm.tolist(),
+        'pre_blank_score': bp.tolist(),
+        'blank_score':     bbl.tolist(),
+        'mlp_score':       mlp_score,
+        'attn_score':      attn_score,
         'mean_high': mh, 'mean_low': ml,
         'effect_gap': mh - ml,
         'n_cases': n, 'num_layers': len(bm),
@@ -389,18 +409,17 @@ def save_base_vs_instruct_bars(base_stats, instruct_stats, out_dir):
         last_base = base_stats[-1]
         sb = last_base['domains'].get(domain)
         if sb:
-            # 2nd bar (red)   = mlp_nie = mlp-only restore = 'Effect with Attn severed'
-            # 3rd bar (green) = attn_nie = attn-only restore = 'Effect with MLP severed'
+            # 2nd bar (red) is MLP-only; 3rd (green) is attention-only.
             subplots.append((f'[Base] {last_base["label"]}',
-                             np.array(sb['states_nie']), np.array(sb['mlp_nie']),
-                             np.array(sb['attn_nie']), sb['num_layers'],
+                             np.array(sb['states_score']), np.array(sb['mlp_score']),
+                             np.array(sb['attn_score']), sb['num_layers'],
                              sb['effect_gap'] < LOW_SIGNAL))
         for e in instruct_stats:
             si = e['domains'].get(domain)
             if si:
                 subplots.append((f'[Instruct] {e["label"]}',
-                                 np.array(si['states_nie']), np.array(si['mlp_nie']),
-                                 np.array(si['attn_nie']), si['num_layers'],
+                                 np.array(si['states_score']), np.array(si['mlp_score']),
+                                 np.array(si['attn_score']), si['num_layers'],
                                  si['effect_gap'] < LOW_SIGNAL))
         if not subplots:
             continue
@@ -524,8 +543,8 @@ def save_bias_trajectory(base_stats, instruct_stats, out_dir):
     One PDF per domain. Three panels across the training timeline:
       Panel 1: Effect gap (high − low) — overall bias strength, raw abs log prob diff units.
       Panel 2: Embedding layer contribution — fraction of effect gap recovered at L0
-               = (states_nie[0] − mean_low) / effect_gap. Scale-invariant across checkpoints.
-      Panel 3: Raw abs. log prob diff at L0 (states_nie[0]) — absolute causal signal at first transformer layer.
+               = (states_score[0] − mean_low) / effect_gap. Scale-invariant across checkpoints.
+      Panel 3: Raw abs. log prob diff at L0 (states_score[0]) — absolute causal signal at first transformer layer.
     Base checkpoints on the left; instruct fine-tuning on the right.
     A vertical dashed line marks the phase boundary.
     """
@@ -536,7 +555,7 @@ def save_bias_trajectory(base_stats, instruct_stats, out_dir):
             if not s:
                 continue
             gap    = s['effect_gap']
-            raw_l0 = s['states_nie'][0]
+            raw_l0 = s['states_score'][0]
             frac_l0 = (raw_l0 - s['mean_low']) / gap if gap > 0 else float('nan')
             base_pts.append((e['label'], gap, frac_l0, raw_l0, gap < LOW_SIGNAL))
 
@@ -545,7 +564,7 @@ def save_bias_trajectory(base_stats, instruct_stats, out_dir):
             if not s:
                 continue
             gap    = s['effect_gap']
-            raw_l0 = s['states_nie'][0]
+            raw_l0 = s['states_score'][0]
             frac_l0 = (raw_l0 - s['mean_low']) / gap if gap > 0 else float('nan')
             instruct_pts.append((e['label'], gap, frac_l0, raw_l0, gap < LOW_SIGNAL))
 
@@ -997,9 +1016,9 @@ def save_prepost_comparison(base_stats, instruct_stats, out_dir):
     inst_last = _get_instruct(instruct_stats)
 
     CONDITIONS = [
-        ('states_nie', BAR_COLORS[0], 'States'),
-        ('mlp_nie',    BAR_COLORS[1], 'Attn severed'),
-        ('attn_nie',   BAR_COLORS[2], 'MLP severed'),
+        ('states_score', BAR_COLORS[0], 'States'),
+        ('mlp_score',    BAR_COLORS[1], 'Attn severed'),
+        ('attn_score',   BAR_COLORS[2], 'MLP severed'),
     ]
 
     BAR_W    = 0.12
@@ -1238,8 +1257,8 @@ def save_cross_patch_nie_comparison(base_stats, instruct_stats, out_dir):
         sb = _npz_for_label(BASE_MODEL, base_last['label'], domain)
         si = _npz_for_label(INST_MODEL, inst_last['label'], domain)
         return [
-            _to_nie(sb, 'states_nie') if sb else None,
-            _to_nie(si, 'states_nie') if si else None,
+            _to_nie(sb, 'states_score') if sb else None,
+            _to_nie(si, 'states_score') if si else None,
             _cp_nie('pre_to_post', domain),
             _cp_nie('post_to_pre', domain),
         ]
@@ -1357,9 +1376,9 @@ def save_nie_heatmap(base_stats, instruct_stats, out_dir):
         if gap <= 0:
             return None
         return np.column_stack([
-            (np.array(s['states_nie'])    - lo) / gap,
-            (np.array(s['pre_blank_nie']) - lo) / gap,
-            (np.array(s['blank_nie'])     - lo) / gap,
+            (np.array(s['states_score'])    - lo) / gap,
+            (np.array(s['pre_blank_score']) - lo) / gap,
+            (np.array(s['blank_score'])     - lo) / gap,
         ])  # (16, 3)
 
     def _draw_row(row_axes, domain):
@@ -1447,9 +1466,9 @@ def save_alp_heatmap(base_stats, instruct_stats, out_dir):
 
     def _mat(s):
         return np.column_stack([
-            np.array(s['states_nie']),
-            np.array(s['pre_blank_nie']),
-            np.array(s['blank_nie']),
+            np.array(s['states_score']),
+            np.array(s['pre_blank_score']),
+            np.array(s['blank_score']),
         ])  # (16, 3) — raw patched scores
 
     def _draw_row(row_axes, domain):
@@ -1544,9 +1563,9 @@ def save_olmo_vs_pythia_prepost(base_stats, pythia_stats, out_dir):
     pythia_last = _get_pythia(pythia_stats)
 
     CONDITIONS = [
-        ('states_nie', BAR_COLORS[0], 'States'),
-        ('mlp_nie',    BAR_COLORS[1], 'Attn severed'),
-        ('attn_nie',   BAR_COLORS[2], 'MLP severed'),
+        ('states_score', BAR_COLORS[0], 'States'),
+        ('mlp_score',    BAR_COLORS[1], 'Attn severed'),
+        ('attn_score',   BAR_COLORS[2], 'MLP severed'),
     ]
 
     BAR_W    = 0.12
@@ -1723,9 +1742,9 @@ def save_olmo_pythia_nie_heatmap(base_stats, pythia_stats, out_dir):
         if gap <= 0:
             return None
         return np.column_stack([
-            (np.array(s['states_nie'])    - lo) / gap,
-            (np.array(s['pre_blank_nie']) - lo) / gap,
-            (np.array(s['blank_nie'])     - lo) / gap,
+            (np.array(s['states_score'])    - lo) / gap,
+            (np.array(s['pre_blank_score']) - lo) / gap,
+            (np.array(s['blank_score'])     - lo) / gap,
         ])
 
     def _draw_row(row_axes, domain):
@@ -1797,9 +1816,9 @@ def save_olmo_pythia_alp_heatmap(base_stats, pythia_stats, out_dir):
 
     def _mat(s):
         return np.column_stack([
-            np.array(s['states_nie']),
-            np.array(s['pre_blank_nie']),
-            np.array(s['blank_nie']),
+            np.array(s['states_score']),
+            np.array(s['pre_blank_score']),
+            np.array(s['blank_score']),
         ])
 
     def _draw_row(row_axes, domain):

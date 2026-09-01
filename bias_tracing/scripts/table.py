@@ -34,8 +34,8 @@ Absolute Log Prob Diff = raw patched score = |(1/N) sum_i log P(s_i | s<i; stere
        Not normalized by effect gap. Captures absolute magnitude changes.
 
 K columns:
-  col 0 = subject position  (bias_mean   / states_nie field)
-  col 2 = target  position  (blank_mean  / blank_nie  field)
+  col 0 = subject position  (bias_mean   / states_score field)
+  col 2 = target  position  (blank_mean  / blank_score  field)
   col 1 = pre-target is excluded from K (context position, not knowledge-storage)
 
 Note on Part 2 distributions:

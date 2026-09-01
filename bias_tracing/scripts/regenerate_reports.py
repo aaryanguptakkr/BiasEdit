@@ -14,7 +14,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import json
 import datetime
 
-from plot_utils import PLOTS_BASE, BIAS_TYPES, LOW_SIGNAL
+from plot_utils import (
+    PLOTS_BASE, BIAS_TYPES, LOW_SIGNAL, normalize_stats_score_fields,
+)
 
 LOW_SIGNAL_THRESHOLD = LOW_SIGNAL
 
@@ -82,8 +84,8 @@ def write_report(stats, out_dir):
         f'| Field | Description |',
         f'|---|---|',
         f'| **N** | Sentence pairs processed |',
-        f'| **Gap** | high_score - low_score; how much corrupting the subject hurts; < 0.03 = low-signal |',
-        f'| **Peak All/MLP/Attn** | Layer with highest NIE under each restore condition |',
+        f'| **Gap** | high_score - low_score; reduction in absolute whole-sentence log-prob separation; < 0.03 = low-signal |',
+        f'| **Peak All/MLP/Attn** | Layer with highest raw patched score under each restore condition |',
         f'| **NIE L0** | Normalized indirect effect at the embedding layer |',
         f'| **NIE L-mid** | NIE at the middle layer |',
         f'| **NIE L-last** | NIE at the final layer |',
@@ -102,14 +104,15 @@ def write_report(stats, out_dir):
             if s is None:
                 lines.append(f'| {e["label"]} | {domain} | — | — | — | — | — | — | — | — |')
                 continue
+            normalize_stats_score_fields(s)
             gap  = s['effect_gap']
             low  = s['mean_low']
             flag = ' ⚠' if gap < LOW_SIGNAL_THRESHOLD else ''
             nl   = s['num_layers']
             mid  = nl // 2
-            nie_l0   = nie(s['states_nie'][0],   low, gap)
-            nie_lmid = nie(s['states_nie'][mid],  low, gap)
-            nie_last = nie(s['states_nie'][-1],   low, gap)
+            nie_l0   = nie(s['states_score'][0],   low, gap)
+            nie_lmid = nie(s['states_score'][mid], low, gap)
+            nie_last = nie(s['states_score'][-1],  low, gap)
             lines.append(
                 f"| {e['label']} | {domain}{flag} | {s['n_cases']} | {gap:.4f} "
                 f"| {s['peak_layer_states']} | {s['peak_layer_mlp']} | {s['peak_layer_attn']} "
@@ -138,10 +141,11 @@ def write_report(stats, out_dir):
             if s is None:
                 lines.append(f'| {domain} | ' + ' | '.join(['—'] * nl) + ' |')
             else:
+                normalize_stats_score_fields(s)
                 gap  = s['effect_gap']
                 low  = s['mean_low']
                 flag = ' ⚠' if gap < LOW_SIGNAL_THRESHOLD else ''
-                vals = ' | '.join(f'{nie(v, low, gap):+.2f}' for v in s['states_nie'])
+                vals = ' | '.join(f'{nie(v, low, gap):+.2f}' for v in s['states_score'])
                 lines.append(f'| {domain}{flag} | {vals} |')
         lines.append('')
 

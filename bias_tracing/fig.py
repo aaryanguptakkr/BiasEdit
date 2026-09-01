@@ -87,7 +87,8 @@ from plot_utils import (
     BASE_COLOR, INSTRUCT_COLOR, LOW_SIG_COLOR, LOW_SIG_BG,
     local_cases_dir, zip_cases_prefix, partition_names, subsample_aligned,
     load_npz_local, load_npz_zip,
-    collect_scores, _draw_bars, _savepdf, normalized_indirect_effect,
+    SCORE_METRIC, validate_score_files, collect_scores,
+    _draw_bars, _savepdf, normalized_indirect_effect,
 )
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -241,6 +242,8 @@ def save_stats_and_report(model_name, all_ckpt_stats, out_dir):
             'model':       model_name,
             'generated':   datetime.date.today().isoformat(),
             'num_sample':  args.num_sample,
+            'stats_schema': 'raw_patch_scores_v2',
+            'score_metric': SCORE_METRIC,
             'checkpoints': all_ckpt_stats,
         }, f, indent=2)
     print(f'  Saved: {json_path}')
@@ -294,10 +297,10 @@ def save_stats_and_report(model_name, all_ckpt_stats, out_dir):
         f'| Field | Description |',
         f'|---|---|',
         f'| **N cases** | Sentence pairs processed |',
-        f'| **High score** | Mean model probability on the correct token (clean run) |',
-        f'| **Low score** | Mean probability after corrupting subject tokens |',
-        f'| **Effect gap** | High − Low — how much corruption hurts; < 0.03 = low-signal |',
-        f'| **Peak All/MLP/Attn** | Layer with highest NIE under each restore condition |',
+        f'| **High score** | Mean clean-run absolute whole-sentence log-prob gap |',
+        f'| **Low score** | Mean corrupted-run absolute whole-sentence log-prob gap |',
+        f'| **Effect gap** | High − Low — reduction in absolute separation after corruption; < 0.03 = low-signal |',
+        f'| **Peak All/MLP/Attn** | Layer with highest raw patched score under each restore condition |',
         f'| **NIE L0** | Normalized indirect effect at the embedding layer |',
         f'| **NIE L-mid** | NIE at the middle layer |',
         f'| **NIE L-last** | NIE at the final layer |',
@@ -320,9 +323,9 @@ def save_stats_and_report(model_name, all_ckpt_stats, out_dir):
             flag = ' ⚠' if gap < LOW_SIGNAL else ''
             nl   = s['num_layers']
             mid  = nl // 2
-            nie_l0   = normalized_indirect_effect(s['states_nie'][0],   low, gap, degenerate='zero')
-            nie_lmid = normalized_indirect_effect(s['states_nie'][mid], low, gap, degenerate='zero')
-            nie_last = normalized_indirect_effect(s['states_nie'][-1],  low, gap, degenerate='zero')
+            nie_l0   = normalized_indirect_effect(s['states_score'][0],   low, gap, degenerate='zero')
+            nie_lmid = normalized_indirect_effect(s['states_score'][mid], low, gap, degenerate='zero')
+            nie_last = normalized_indirect_effect(s['states_score'][-1],  low, gap, degenerate='zero')
             lines.append(
                 f"| {e['label']} | {domain}{flag} | {s['n_cases']} | {gap:.4f} "
                 f"| {s['peak_layer_states']} | {s['peak_layer_mlp']} | {s['peak_layer_attn']} "
@@ -346,7 +349,7 @@ def save_stats_and_report(model_name, all_ckpt_stats, out_dir):
         f'',
     ]
     for e in all_ckpt_stats:
-        nl  = 16
+        nl = e['domains'][next(iter(e['domains']))]['num_layers'] if e['domains'] else 0
         hdr = '| Domain | ' + ' | '.join(f'L{i}' for i in range(nl)) + ' |'
         sep = '|---|' + '---|' * nl
         lines += [f'### {e["label"]}  `{e["checkpoint"]}`', '', hdr, sep]
@@ -358,7 +361,7 @@ def save_stats_and_report(model_name, all_ckpt_stats, out_dir):
                 gap  = s['effect_gap']
                 low  = s['mean_low']
                 flag = '  ⚠ low-signal' if gap < LOW_SIGNAL else ''
-                nie_vals = normalized_indirect_effect(s['states_nie'], low, gap, degenerate='zero')
+                nie_vals = normalized_indirect_effect(s['states_score'], low, gap, degenerate='zero')
                 vals = ' | '.join(f'{v:+.2f}' for v in nie_vals)
                 lines.append(f'| {domain}{flag} | {vals} |')
         lines.append('')
@@ -423,9 +426,9 @@ def save_bias_delta(ckpt_stats_list, model_name, out_dir):
                 # Return (states, mlp_only, attn_only) — order matches bar chart convention:
                 # 2nd bar (red)   = mlp-only restore = 'Effect with Attn severed'
                 # 3rd bar (green) = attn-only restore = 'Effect with MLP severed'
-                return (np.array(ckpt_s['states_nie']),
-                        np.array(ckpt_s['mlp_nie']),
-                        np.array(ckpt_s['attn_nie']))
+                return (np.array(ckpt_s['states_score']),
+                        np.array(ckpt_s['mlp_score']),
+                        np.array(ckpt_s['attn_score']))
 
             s_p, a_p, m_p = raw_arr(sp)
             s_c, a_c, m_c = raw_arr(sc)
@@ -482,8 +485,8 @@ def save_bias_trajectory(base_stats, instruct_stats, out_dir):
     Three panels:
       1. Effect gap (high − low) — overall bias strength, raw abs log prob diff units.
       2. Embedding layer contribution — fraction of effect gap recovered at L0
-         = (states_nie[0] − mean_low) / effect_gap. Scale-invariant across checkpoints.
-      3. Raw abs. log prob diff at L0 (states_nie[0]) — absolute causal signal at first transformer layer.
+         = (states_score[0] − mean_low) / effect_gap. Scale-invariant across checkpoints.
+      3. Raw abs. log prob diff at L0 (states_score[0]) — absolute causal signal at first transformer layer.
     Base checkpoints appear on the left; instruct fine-tuning on the right;
     a vertical dashed line marks the phase boundary.
     Output: {domain}-bias-trajectory.pdf  (one per domain)
@@ -495,7 +498,7 @@ def save_bias_trajectory(base_stats, instruct_stats, out_dir):
             if not s:
                 continue
             gap    = s['effect_gap']
-            raw_l0 = s['states_nie'][0]
+            raw_l0 = s['states_score'][0]
             frac_l0 = normalized_indirect_effect(raw_l0, s['mean_low'], gap, degenerate='nan')
             base_pts.append((e['label'], gap, frac_l0, raw_l0, gap < LOW_SIGNAL))
 
@@ -504,7 +507,7 @@ def save_bias_trajectory(base_stats, instruct_stats, out_dir):
             if not s:
                 continue
             gap    = s['effect_gap']
-            raw_l0 = s['states_nie'][0]
+            raw_l0 = s['states_score'][0]
             frac_l0 = normalized_indirect_effect(raw_l0, s['mean_low'], gap, degenerate='nan')
             instruct_pts.append((e['label'], gap, frac_l0, raw_l0, gap < LOW_SIGNAL))
 
@@ -591,9 +594,9 @@ def save_base_vs_instruct(base_stats, instruct_stats, out_dir):
           2nd bar (red)   = mlp-only restore = 'Effect with Attn severed'
           3rd bar (green) = attn-only restore = 'Effect with MLP severed'
         """
-        return (np.array(s['states_nie']),
-                np.array(s['mlp_nie']),
-                np.array(s['attn_nie']))
+        return (np.array(s['states_score']),
+                np.array(s['mlp_score']),
+                np.array(s['attn_score']))
 
     for domain in BIAS_TYPES:
         subplots = []
@@ -675,6 +678,16 @@ def save_base_vs_instruct(base_stats, instruct_stats, out_dir):
 # Data lives at {family base}/{family}_{direction}/{domain}/causal_trace/cases/
 # (local filesystem, not in the zip — always read with load_npz_local).
 
+
+def _validate_result_group(file_lists, loader, expected, label):
+    try:
+        validate_score_files(file_lists, loader, expected)
+        return True
+    except ValueError as ex:
+        print(f'    [{label}] Invalid result set: {ex}')
+        return False
+
+
 def load_cross_patch_domain(direction_key, domain, num_sample=None, family='olmo_1b'):
     """
     Load cross-patch .npz files for one (family, direction, domain) triple.
@@ -711,6 +724,24 @@ def load_cross_patch_domain(direction_key, domain, num_sample=None, family='olmo
 
     if not single_items:
         print('    No single-state files; skipping.')
+        return None
+
+    family_cfg = CROSS_PATCH_FAMILIES[family]
+    if direction_key == 'pre_to_post':
+        source_model = family_cfg['base_model']
+        target_model = family_cfg['instruct_model']
+    else:
+        source_model = family_cfg['instruct_model']
+        target_model = family_cfg['base_model']
+    expected = {
+        'score_metric': SCORE_METRIC,
+        'source_model': source_model,
+        'target_model': target_model,
+        'direction': f'{source_model} -> {target_model}',
+    }
+    if not _validate_result_group(
+            (single_items, attn_items, mlp_items), load_npz_local,
+            expected, 'cross_patch'):
         return None
 
     try:
@@ -938,6 +969,18 @@ def load_within_model_from_zip(zf, zip_names_all, model_name, org, checkpoint, d
     if not single_items:
         return None
 
+    expected_model = f'{org}/{model_name}'
+    expected = {
+        'score_metric': SCORE_METRIC,
+        'source_model': expected_model,
+        'target_model': expected_model,
+        'direction': f'{expected_model} -> {expected_model}',
+    }
+    if not _validate_result_group(
+            (single_items, attn_items, mlp_items), loader,
+            expected, '4panel'):
+        return None
+
     try:
         num_layer = loader(single_items[0])['scores'].shape[-1]
     except Exception as ex:
@@ -995,6 +1038,18 @@ def load_within_model_from_local(model_name, org, checkpoint, domain, num_sample
 
     print(f'    single={len(single_items)}, attn={len(attn_items)}, mlp={len(mlp_items)}')
     if not single_items:
+        return None
+
+    expected_model = f'{org}/{model_name}'
+    expected = {
+        'score_metric': SCORE_METRIC,
+        'source_model': expected_model,
+        'target_model': expected_model,
+        'direction': f'{expected_model} -> {expected_model}',
+    }
+    if not _validate_result_group(
+            (single_items, attn_items, mlp_items), loader,
+            expected, '4panel'):
         return None
 
     try:
@@ -1240,6 +1295,17 @@ def _load_from_main_zip(main_zf, domain, num_sample=None):
     loader       = lambda p: load_npz_zip(main_zf, p)
     print(f'    [main.zip] {domain}: single={len(single_items)}, attn={len(attn_items)}, mlp={len(mlp_items)}')
     if not single_items:
+        return None
+    expected_model = 'allenai/OLMo-2-0425-1B'
+    expected = {
+        'score_metric': SCORE_METRIC,
+        'source_model': expected_model,
+        'target_model': expected_model,
+        'direction': f'{expected_model} -> {expected_model}',
+    }
+    if not _validate_result_group(
+            (single_items, attn_items, mlp_items), loader,
+            expected, 'main.zip'):
         return None
     try:
         num_layer = loader(single_items[0])['scores'].shape[-1]
@@ -1636,17 +1702,17 @@ def save_main_body_nie_overlay(out_dir, num_sample=None, main_zf=None):
     inst_res = load_within_model_from_local(
         'OLMo-2-0425-1B-Instruct', 'allenai', 'step_2000', 'gender', num_sample)
 
-    NIE_KEYS   = ('states_nie', 'mlp_nie', 'attn_nie')
+    SCORE_KEYS = ('states_score', 'mlp_score', 'attn_score')
     NIE_LABELS = ['States', 'Attn severed', 'MLP severed']
 
     def _nie(res, key):
-        key_map = {'states_nie': 'bias_mean', 'mlp_nie': 'mlp_mean', 'attn_nie': 'attn_mean'}
+        key_map = {'states_score': 'bias_mean', 'mlp_score': 'mlp_mean', 'attn_score': 'attn_mean'}
         if res is None:
             return None
         return normalized_indirect_effect(res[key_map[key]], res['mean_low'], res['effect_gap'])   # None if gap <= 0
 
     all_vals = []
-    for key in NIE_KEYS:
+    for key in SCORE_KEYS:
         for res in (base_res, inst_res):
             v = _nie(res, key)
             if v is not None:
@@ -1662,7 +1728,7 @@ def save_main_body_nie_overlay(out_dir, num_sample=None, main_zf=None):
 
     fig, ax = plt.subplots(1, 1, figsize=(7.0, FIG_ROW_H + 0.5))
 
-    for ki, (key, cond_label) in enumerate(zip(NIE_KEYS, NIE_LABELS)):
+    for ki, (key, cond_label) in enumerate(zip(SCORE_KEYS, NIE_LABELS)):
         color = BAR_COLORS[ki]
         nie_b = _nie(base_res, key)
         nie_i = _nie(inst_res, key)
@@ -2144,12 +2210,12 @@ def save_appendix_A6_heatmap(base_stats, instruct_stats, out_dir, num_sample=Non
     A6_FS_CBAR   = FS_TICK   + 2   # 10
 
     # (display label, stats.json key, load_within_model_from_local dict key)
-    # attn_nie in stats = _attn.npz = Attn-only restore = MLP-severed condition
-    # mlp_nie  in stats = _mlp.npz  = MLP-only restore  = Attn-severed condition
+    # attn_score in stats = _attn.npz = Attn-only restore = MLP-severed condition
+    # mlp_score  in stats = _mlp.npz  = MLP-only restore  = Attn-severed condition
     conditions = [
-        (STATES_LABELS[0], 'states_nie', 'bias_mean'),
-        (STATES_LABELS[1], 'mlp_nie',    'mlp_mean'),
-        (STATES_LABELS[2], 'attn_nie',   'attn_mean'),
+        (STATES_LABELS[0], 'states_score', 'bias_mean'),
+        (STATES_LABELS[1], 'mlp_score',    'mlp_mean'),
+        (STATES_LABELS[2], 'attn_score',   'attn_mean'),
     ]
 
     # Load step_2000 from local NFS (full result dict with mean_low + effect_gap).
@@ -2340,6 +2406,18 @@ for model_name in (models_to_run if RUN_BARS or RUN_DELTA or RUN_COMPARE else []
                 print('    No single-state files; skipping.')
                 continue
 
+            expected_model = f'{org}/{model_name}'
+            expected = {
+                'score_metric': SCORE_METRIC,
+                'source_model': expected_model,
+                'target_model': expected_model,
+                'direction': f'{expected_model} -> {expected_model}',
+            }
+            if not _validate_result_group(
+                    (single_items, attn_items, mlp_items), loader,
+                    expected, 'within_model'):
+                continue
+
             try:
                 num_layer = loader(single_items[0])['scores'].shape[-1]
             except Exception as ex:
@@ -2390,11 +2468,11 @@ for model_name in (models_to_run if RUN_BARS or RUN_DELTA or RUN_COMPARE else []
                 'mean_high':         round(mean_high, 6),
                 'mean_low':          round(mean_low,  6),
                 'effect_gap':        round(mean_high - mean_low, 6),
-                'states_nie':        bias_mean.tolist(),
-                'attn_nie':          attn_mean.tolist(),
-                'mlp_nie':           mlp_mean.tolist(),
-                'pre_blank_nie':     pre_blank_mean.tolist(),
-                'blank_nie':         blank_mean.tolist(),
+                'states_score':      bias_mean.tolist(),
+                'attn_score':        attn_mean.tolist(),
+                'mlp_score':         mlp_mean.tolist(),
+                'pre_blank_score':   pre_blank_mean.tolist(),
+                'blank_score':       blank_mean.tolist(),
                 'peak_layer_states': int(np.argmax(bias_mean)),
                 'peak_layer_mlp':    int(np.argmax(mlp_mean)),
                 'peak_layer_attn':   int(np.argmax(attn_mean)),
@@ -2550,11 +2628,11 @@ def _load_checkpoints_from_npz(model_name, num_sample=None):
             if res is None:
                 continue
             entry['domains'][domain] = {
-                'states_nie':        res['bias_mean'].tolist(),
-                'pre_blank_nie':     res['pre_blank_mean'].tolist(),
-                'blank_nie':         res['blank_mean'].tolist(),
-                'mlp_nie':           res['mlp_mean'].tolist(),
-                'attn_nie':          res['attn_mean'].tolist(),
+                'states_score':      res['bias_mean'].tolist(),
+                'pre_blank_score':   res['pre_blank_mean'].tolist(),
+                'blank_score':       res['blank_mean'].tolist(),
+                'mlp_score':         res['mlp_mean'].tolist(),
+                'attn_score':        res['attn_mean'].tolist(),
                 'mean_high':         float(res['mean_high']),
                 'mean_low':          float(res['mean_low']),
                 'effect_gap':        float(res['effect_gap']),

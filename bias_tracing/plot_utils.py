@@ -88,20 +88,37 @@ MODEL_CONFIGS = {
 # The .npz format is identical to within-model causal tracing, so the same
 # collect_scores / _draw_bars pipeline applies.
 #
-# Runs exist for several model families. Each family's data lives at
-# {base}/{family}_{direction}/{domain}/causal_trace/cases/ — the OLMo runs on
-# the shared transfer directory, the newer families in the repo-local results
-# tree (written there by scripts/cross_patch.sh on the cross-model-patching
-# branch; results/ is gitignored so the files are branch-independent).
+# Runs exist for several model families. scripts/cross_patch.sh writes all of
+# them below the repository-local results tree, so plotting reads the same root.
 
-CROSS_PATCH_BASE       = f'/deepfreeze/share/{name4}/results/cross_patch'
-CROSS_PATCH_LOCAL_BASE = f'{LOCAL_BASE}/cross_patch'
+CROSS_PATCH_BASE       = f'{LOCAL_BASE}/cross_patch'
+CROSS_PATCH_LOCAL_BASE = CROSS_PATCH_BASE
 
 CROSS_PATCH_FAMILIES = {
-    'olmo_1b':      {'base': CROSS_PATCH_BASE,       'label': 'OLMo-2 1B'},
-    'qwen2.5_1.5b': {'base': CROSS_PATCH_LOCAL_BASE, 'label': 'Qwen2.5 1.5B'},
-    'llama3.2_1b':  {'base': CROSS_PATCH_LOCAL_BASE, 'label': 'Llama-3.2 1B'},
-    'gemma3_1b':    {'base': CROSS_PATCH_LOCAL_BASE, 'label': 'Gemma-3 1B'},
+    'olmo_1b': {
+        'base': CROSS_PATCH_BASE,
+        'label': 'OLMo-2 1B',
+        'base_model': 'allenai/OLMo-2-0425-1B',
+        'instruct_model': 'allenai/OLMo-2-0425-1B-Instruct',
+    },
+    'qwen2.5_1.5b': {
+        'base': CROSS_PATCH_LOCAL_BASE,
+        'label': 'Qwen2.5 1.5B',
+        'base_model': 'Qwen/Qwen2.5-1.5B',
+        'instruct_model': 'Qwen/Qwen2.5-1.5B-Instruct',
+    },
+    'llama3.2_1b': {
+        'base': CROSS_PATCH_LOCAL_BASE,
+        'label': 'Llama-3.2 1B',
+        'base_model': 'meta-llama/Llama-3.2-1B',
+        'instruct_model': 'meta-llama/Llama-3.2-1B-Instruct',
+    },
+    'gemma3_1b': {
+        'base': CROSS_PATCH_LOCAL_BASE,
+        'label': 'Gemma-3 1B',
+        'base_model': 'google/gemma-3-1b-pt',
+        'instruct_model': 'google/gemma-3-1b-it',
+    },
 }
 
 # 'dir' is the olmo_1b run directory — kept for existing scripts (table.py,
@@ -260,23 +277,19 @@ def _case_stem(name):
 
 
 def subsample_aligned(single, attn, mlp, num_sample):
-    """Subsample the three restore-type file lists so they cover the SAME cases.
-
-    Slicing single/attn/mlp independently with [:num_sample] can pick mismatched
-    case subsets (the lists are sorted lexicographically and a case may be missing
-    one of its three files), which would average the three bars over different
-    cases. This takes the first num_sample full-restore cases, then keeps only the
-    attn/mlp files belonging to those same cases.
-
-    num_sample=None → return all three unchanged (the all-data path).
-    """
-    if num_sample is None:
-        return single, attn, mlp
-    chosen = single[:num_sample]
-    keep   = {_case_stem(s) for s in chosen}
-    return (chosen,
-            [a for a in attn if _case_stem(a) in keep],
-            [m for m in mlp  if _case_stem(m) in keep])
+    """Return the same case subset for full, attention, and MLP restores."""
+    single_by_case = {_case_stem(name): name for name in single}
+    attn_by_case = {_case_stem(name): name for name in attn}
+    mlp_by_case = {_case_stem(name): name for name in mlp}
+    common = set(single_by_case) & set(attn_by_case) & set(mlp_by_case)
+    chosen = [_case_stem(name) for name in single if _case_stem(name) in common]
+    if num_sample is not None:
+        chosen = chosen[:num_sample]
+    return (
+        [single_by_case[case] for case in chosen],
+        [attn_by_case[case] for case in chosen],
+        [mlp_by_case[case] for case in chosen],
+    )
 
 
 def load_npz_local(path):
@@ -286,6 +299,97 @@ def load_npz_local(path):
 def load_npz_zip(zf, zip_path):
     with zf.open(zip_path) as f:
         return np.load(io.BytesIO(f.read()), allow_pickle=True)
+
+
+SCORE_METRIC = 'sentence_abs_logprob_diff_v1'
+STATS_SCORE_FIELDS = {
+    'states_nie': 'states_score',
+    'attn_nie': 'attn_score',
+    'mlp_nie': 'mlp_score',
+    'pre_blank_nie': 'pre_blank_score',
+    'blank_nie': 'blank_score',
+}
+
+
+def normalize_stats_score_fields(domain_stats):
+    """Expose correctly named raw-score fields when reading legacy stats.json."""
+    for legacy_key, score_key in STATS_SCORE_FIELDS.items():
+        if score_key not in domain_stats and legacy_key in domain_stats:
+            domain_stats[score_key] = domain_stats[legacy_key]
+    return domain_stats
+
+
+def _metadata_value(data, key):
+    if key not in data:
+        return None
+    return np.asarray(data[key]).item()
+
+
+def result_metadata(data):
+    """Return the fields that define whether two result files are compatible."""
+    scores = np.asarray(data['scores'])
+    if scores.ndim < 1:
+        raise ValueError('scores must have a layer dimension')
+    score_layers = int(scores.shape[-1])
+    declared_layers = _metadata_value(data, 'num_layers')
+    if declared_layers is not None and int(declared_layers) != score_layers:
+        raise ValueError(
+            f'num_layers={declared_layers} but scores has {score_layers} layers'
+        )
+    return {
+        'score_metric': _metadata_value(data, 'score_metric'),
+        'source_model': _metadata_value(data, 'source_model'),
+        'target_model': _metadata_value(data, 'target_model'),
+        'source_revision': _metadata_value(data, 'source_revision'),
+        'target_revision': _metadata_value(data, 'target_revision'),
+        'direction': _metadata_value(data, 'direction'),
+        'num_layers': score_layers,
+    }
+
+
+def validate_score_files(file_lists, loader, expected=None):
+    """Reject mixed or incorrectly labelled NPZ files before aggregation.
+
+    A homogeneous legacy set without metadata is still readable, but it is
+    reported explicitly. Mixing legacy and current-schema files is rejected.
+    """
+    reference = None
+    for item in (item for file_list in file_lists for item in file_list):
+        try:
+            metadata = result_metadata(loader(item))
+        except Exception as exc:
+            raise ValueError(f'cannot validate {item}: {exc}') from exc
+
+        if metadata['score_metric'] is not None:
+            required = (
+                'source_model', 'target_model',
+                'source_revision', 'target_revision', 'direction',
+            )
+            missing = [key for key in required if metadata[key] is None]
+            if missing:
+                raise ValueError(
+                    f'{item}: current-schema result is missing metadata {missing}'
+                )
+
+        if expected is not None:
+            for key, expected_value in expected.items():
+                actual_value = metadata.get(key)
+                if actual_value is not None and actual_value != expected_value:
+                    raise ValueError(
+                        f'{item}: expected {key}={expected_value!r}, '
+                        f'found {actual_value!r}'
+                    )
+
+        if reference is None:
+            reference = metadata
+        elif metadata != reference:
+            raise ValueError(
+                f'{item}: result metadata differs from other files in this group'
+            )
+
+    if reference is not None and reference['score_metric'] is None:
+        print('    [metadata] homogeneous legacy NPZ set; direction is inferred from its directory')
+    return reference
 
 
 def collect_scores(file_list, loader):
@@ -316,7 +420,8 @@ def collect_scores(file_list, loader):
             blank.append(scores[idx0:idx1])
             highs.append(float(d['high_score']))
             lows.append(float(d['low_score']))
-        except Exception:
+        except Exception as exc:
+            print(f'    [collect_scores] Skipping {item}: {exc}')
             continue
     if not bias_word:
         return None, None, None, 0, 0.0, 0.0

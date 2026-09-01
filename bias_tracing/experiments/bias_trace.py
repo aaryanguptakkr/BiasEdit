@@ -50,12 +50,22 @@ def main():
         parser.add_argument(*args, **kwargs)
 
     def parse_noise_rule(code):
-        if code in ["m", "s"]:
+        if code == "s":
             return code
-        elif re.match(r"^[uts][\d\.]+", code):
+        if code.startswith(("s", "u")):
+            try:
+                float(code[1:])
+            except ValueError as exc:
+                raise argparse.ArgumentTypeError(
+                    "noise must be a number, s[scale], or u[scale]"
+                ) from exc
             return code
-        else:
+        try:
             return float(code)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                "noise must be a number, s[scale], or u[scale]"
+            ) from exc
 
     aa(
         "--model_source",
@@ -147,6 +157,10 @@ def main():
             torch_dtype = torch.float16
         elif any(k in model_name.lower() for k in ("qwen", "llama-3", "gemma")):
             torch_dtype = torch.bfloat16
+        elif "llama" in model_name.lower() or "gpt-j" in model_name.lower():
+            torch_dtype = torch.float16
+        elif "gpt" in model_name.lower():
+            torch_dtype = torch.float32
         else:
             raise ValueError(f"No dtype rule for {model_name}")
         return torch_dtype
@@ -156,6 +170,7 @@ def main():
 
     mt_source = ModelAndTokenizer(args.model_source, torch_dtype=torch_dtype_source, branch=args.branch1)
     mt_target = ModelAndTokenizer(args.model_target, torch_dtype=torch_dtype_target, branch=args.branch2)
+    validate_model_pair(mt_source, mt_target)
 
     # Embedding
     subjects = json.load(open(args.subject_file))
@@ -186,6 +201,8 @@ def main():
     start_entry = {
         "status": "started",
         "model_name": model_base,
+        "source_revision": args.branch1 or "",
+        "target_revision": args.branch2 or "",
         "domain": domain,
         "output_dir": output_dir,
         "num_layers": mt_target.num_layers,
@@ -228,7 +245,8 @@ def main():
             states_to_patch=[], 
             tokens_to_mixs=e_range_anti, # bias attribute words
             noise=noise_level, 
-            uniform_noise=uniform_noise
+            uniform_noise=uniform_noise,
+            replace=args.replace,
         )
 
         stereo_outputs = trace_with_patch(
@@ -238,7 +256,8 @@ def main():
             states_to_patch=[], 
             tokens_to_mixs=e_range_stereo, 
             noise=noise_level, 
-            uniform_noise=uniform_noise
+            uniform_noise=uniform_noise,
+            replace=args.replace,
         )
         # Outputs with corrupted the embedding of bias attribute words
         pred_anti = _logits(anti_outputs)
@@ -262,14 +281,22 @@ def main():
                 cached_metric = str(numpy.asarray(cached_result.get("score_metric", "")).item())
                 cached_source = str(numpy.asarray(cached_result.get("source_model", "")).item())
                 cached_target = str(numpy.asarray(cached_result.get("target_model", "")).item())
+                cached_source_revision = str(numpy.asarray(
+                    cached_result.get("source_revision", "<missing>")).item())
+                cached_target_revision = str(numpy.asarray(
+                    cached_result.get("target_revision", "<missing>")).item())
                 if (cached_metric == SCORE_METRIC and
                         cached_source == args.model_source and
-                        cached_target == args.model_target):
+                        cached_target == args.model_target and
+                        cached_source_revision == (args.branch1 or "") and
+                        cached_target_revision == (args.branch2 or "")):
                     numpy_result = cached_result
                 else:
                     raise RuntimeError(
                         f"Refusing to overwrite {filename}: it was produced under a different "
-                        f"metric/direction (metric={cached_metric or 'legacy'}). "
+                        f"metric/direction/revision (metric={cached_metric or 'legacy'}, "
+                        f"source_revision={cached_source_revision}, "
+                        f"target_revision={cached_target_revision}). "
                         f"Old results are never overwritten — use a fresh --output_dir.")
 
             if numpy_result is None:
@@ -595,6 +622,8 @@ def calculate_hidden_flow(
         case_id=knowledge["id"],
         source_model=mt_source.model_name,
         target_model=mt_target.model_name,
+        source_revision=mt_source.revision,
+        target_revision=mt_target.revision,
         direction=f"{mt_source.model_name} -> {mt_target.model_name}",
         num_layers=mt_target.num_layers,
         anti_input_ids=inp_anti["input_ids"][0],                               # input_ids of the prompt
@@ -774,13 +803,13 @@ class ModelAndTokenizer:
         if tokenizer is None:
             assert model_name is not None
             if any(k in model_name.lower() for k in ("qwen", "llama-3", "gemma")):
-                tokenizer = AutoTokenizer.from_pretrained(model_name)
+                tokenizer = AutoTokenizer.from_pretrained(model_name, revision=branch)
             elif "llama" in model_name.lower():
-                tokenizer = LlamaTokenizer.from_pretrained(model_name)
+                tokenizer = LlamaTokenizer.from_pretrained(model_name, revision=branch)
             elif model_name=="gpt2-medium":
-                tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+                tokenizer = GPT2Tokenizer.from_pretrained(model_name, revision=branch)
             else:
-                tokenizer = AutoTokenizer.from_pretrained(model_name)
+                tokenizer = AutoTokenizer.from_pretrained(model_name, revision=branch)
                 
         if model is None:
             assert model_name is not None
@@ -793,14 +822,16 @@ class ModelAndTokenizer:
                     tokenizer.pad_token = tokenizer.eos_token   # llama-3.2 only; qwen/gemma ship pad tokens
             elif "llama" in model_name.lower():
                 model = LlamaForCausalLM.from_pretrained(
-                    model_name, low_cpu_mem_usage=low_cpu_mem_usage, torch_dtype=torch_dtype
+                    model_name, low_cpu_mem_usage=low_cpu_mem_usage, torch_dtype=torch_dtype,
+                    revision=branch,
                 )
                 tokenizer.add_special_tokens({'pad_token': '[PAD]'})
                 model.resize_token_embeddings(len(tokenizer))
                 model.model.embed_tokens.weight.data[-1] = model.model.embed_tokens.weight.data.mean(0)
             elif "gpt" in model_name.lower():
                 model = AutoModelForCausalLM.from_pretrained(
-                    model_name, low_cpu_mem_usage=low_cpu_mem_usage, torch_dtype=torch_dtype
+                    model_name, low_cpu_mem_usage=low_cpu_mem_usage, torch_dtype=torch_dtype,
+                    revision=branch,
                 )
                 tokenizer.add_special_tokens({'pad_token': '[PAD]'})
                 model.resize_token_embeddings(len(tokenizer))
@@ -838,6 +869,7 @@ class ModelAndTokenizer:
         self.num_layers = len(self.layer_names)
         self.iscausal = True   # causal-only pipeline
         self.model_name = model_name
+        self.revision = branch or ""
 
     def __repr__(self):
         return (
@@ -865,6 +897,44 @@ def layername(model, num, kind=None):
             return f'model.layers.{num}.self_attn'
         return f'model.layers.{num}{"" if kind is None else "." + kind}'
     assert False, "unknown transformer structure"
+
+
+def validate_model_pair(mt_source, mt_target):
+    """Reject source/target pairs whose token or activation coordinates differ."""
+    source_hidden = getattr(mt_source.model.config, "hidden_size", None)
+    target_hidden = getattr(mt_target.model.config, "hidden_size", None)
+    if source_hidden != target_hidden:
+        raise ValueError(
+            f"source/target hidden sizes differ: {source_hidden} != {target_hidden}"
+        )
+    if mt_source.num_layers != mt_target.num_layers:
+        raise ValueError(
+            f"source/target layer counts differ: "
+            f"{mt_source.num_layers} != {mt_target.num_layers}"
+        )
+    if mt_source.tokenizer.get_vocab() != mt_target.tokenizer.get_vocab():
+        raise ValueError("source/target tokenizer vocabularies differ")
+
+    probe = "The doctor said she was busy."
+    if (mt_source.tokenizer(probe)["input_ids"] !=
+            mt_target.tokenizer(probe)["input_ids"]):
+        raise ValueError("source/target tokenizers assign different input positions")
+
+    source_modules = {name for name, _ in mt_source.model.named_modules()}
+    target_modules = {name for name, _ in mt_target.model.named_modules()}
+    required_paths = [
+        layername(mt_target.model, layer, kind)
+        for layer in range(mt_target.num_layers)
+        for kind in (None, "attn", "mlp")
+    ]
+    missing_source = [path for path in required_paths if path not in source_modules]
+    missing_target = [path for path in required_paths if path not in target_modules]
+    if missing_source or missing_target:
+        raise ValueError(
+            "source/target patch module paths differ: "
+            f"missing in source={missing_source[:3]}, "
+            f"missing in target={missing_target[:3]}"
+        )
 
 
 
