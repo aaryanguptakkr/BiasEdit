@@ -263,14 +263,18 @@ def jsd_hist(a, b, n_bins=50):
     to recover the JS divergence in bits, bounded [0, 1].
     Valid only when values are always >= 0 (Absolute Log Prob Diff satisfies this).
     """
-    # lo = min(a.min(), b.min())
-    # hi = max(a.max(), b.max())
-    # if lo == hi:
-        # return 0.0
-    # bins = np.linspace(lo, hi, n_bins + 1)
-    # pa, _ = np.histogram(a, bins=bins)
-    pa, _ = np.histogram(a)
-    pb, _ = np.histogram(b)
+    # Both histograms MUST use the same edges. np.histogram(a) / np.histogram(b)
+    # bin each array over its own min-max, so bin k of pa and bin k of pb cover
+    # different value ranges and jensenshannon compares unrelated buckets. That
+    # understates divergence, always: two Gaussians at 0.30 and 0.60 that barely
+    # overlap score 0.0198 that way, against 0.9965 with shared edges.
+    lo = min(a.min(), b.min())
+    hi = max(a.max(), b.max())
+    if lo == hi:
+        return 0.0
+    bins = np.linspace(lo, hi, n_bins + 1)
+    pa, _ = np.histogram(a, bins=bins)
+    pb, _ = np.histogram(b, bins=bins)
     # jensenshannon normalizes the count vectors internally and handles zero
     # bins via the 0*log0 = 0 convention; it returns the JS distance (sqrt).
     return float(jensenshannon(pa, pb, base=2) ** 2)
