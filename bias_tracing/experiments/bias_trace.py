@@ -349,6 +349,22 @@ def main():
             plot_trace_heatmap(plot_result, savepdf_pre=pdfname, modelname=mt_target.model_name)
 
 
+def trace_source_states(model_source, inp, layers):
+    """One clean forward on the source model, retaining every layer that will be patched.
+
+    trace_with_patch runs the source once per (token, layer) patch, but the source is never
+    noised and never patched, so all of those forwards compute the identical thing and only
+    one activation is read from each. For a 7-token sentence on a 16-layer model that is 672
+    identical forwards per case. Hoisting this to one forward per (sentence, kind) and passing
+    the result in as `source_cache` removes them without changing any value: the retained
+    tensors are the same objects the per-call version would have produced, and nothing
+    mutates them (patch_rep writes into the target's activations, never the source's).
+    """
+    with torch.no_grad(), nethook.TraceDict(model_source, layers) as source_trace:
+        model_source(**inp)
+    return source_trace
+
+
 def trace_with_patch(
     model_source, # The source model to patch from
     model_target,  # The target model to patch to
@@ -359,6 +375,7 @@ def trace_with_patch(
     uniform_noise=False,
     replace=False,  # True to replace with instead of add noise
     trace_layers=None,  # List of traced outputs to return
+    source_cache=None,  # Pre-traced clean source activations (see trace_source_states)
 ):
     """
     Runs a single causal trace.  Given a model and a batch input where
@@ -403,9 +420,20 @@ def trace_with_patch(
     # We must run this completely before defining the patch rule so the 
     # data actually exists when the target model goes looking for it.
     # =========================================================================
+    # The source is never noised and never patched (patch_rep below is attached to the
+    # TARGET only), so this forward is identical for every (token, layer) patch on the same
+    # input. `source_cache` lets the caller compute it once per sentence and hand it in;
+    # without one we fall back to the original per-call forward. When nothing is being
+    # patched (the corrupted-run call, states_to_patch=[]) patch_rep never reads a source
+    # activation, so no source forward is needed at all.
     layers_to_trace = list(patch_spec.keys())
-    with torch.no_grad(), nethook.TraceDict(model_source, layers_to_trace) as source_trace:
-        model_source(**inp)
+    if source_cache is not None:
+        source_trace = source_cache
+    elif layers_to_trace:
+        with torch.no_grad(), nethook.TraceDict(model_source, layers_to_trace) as source_trace:
+            model_source(**inp)
+    else:
+        source_trace = None
 
     # Define the model-patching rule.
     if isinstance(noise, float):
@@ -664,6 +692,11 @@ def trace_important_states(
     
     sl_anti = sentence_labels(inp_anti, mt_target.tokenizer.pad_token_id)
     sl_stereo = sentence_labels(inp_stereo, mt_target.tokenizer.pad_token_id)
+    # One clean source forward per sentence, covering every layer any patch below will ask
+    # for, instead of one forward per (token, layer). See trace_source_states.
+    patchable = [layername(mt_target.model, L) for L in range(mt_target.num_layers)]
+    src_anti = trace_source_states(mt_source.model, inp_anti, patchable)
+    src_stereo = trace_source_states(mt_source.model, inp_stereo, patchable)
     table = [] # (num_layers, seq_len)
     table_sentence = []
 
@@ -680,6 +713,7 @@ def trace_important_states(
                 noise=noise,
                 uniform_noise=uniform_noise,
                 replace=replace,
+                source_cache=src_anti,
             )
             stereo_outputs = trace_with_patch(
                 model_source=mt_source.model,
@@ -690,6 +724,7 @@ def trace_important_states(
                 noise=noise,
                 uniform_noise=uniform_noise,
                 replace=replace,
+                source_cache=src_stereo,
             )
             pred_anti = _logits(anti_outputs)
             targ_anti = inp_anti["labels"]
@@ -730,6 +765,11 @@ def trace_important_window(
     
     sl_anti = sentence_labels(inp_anti, mt_target.tokenizer.pad_token_id)
     sl_stereo = sentence_labels(inp_stereo, mt_target.tokenizer.pad_token_id)
+    # One clean source forward per sentence covering every `kind` submodule any window below
+    # will ask for, instead of one forward per (token, layer). See trace_source_states.
+    patchable = [layername(mt_target.model, L, kind) for L in range(mt_target.num_layers)]
+    src_anti = trace_source_states(mt_source.model, inp_anti, patchable)
+    src_stereo = trace_source_states(mt_source.model, inp_stereo, patchable)
     table = [] # (num_layers, seq_len)
     table_sentence = []
     for tnum in range(ntoks_anti):
@@ -751,6 +791,7 @@ def trace_important_window(
                 noise=noise,
                 uniform_noise=uniform_noise,
                 replace=replace,
+                source_cache=src_anti,
             )
 
             layerlist_stereo = [
@@ -768,6 +809,7 @@ def trace_important_window(
                 noise=noise,
                 uniform_noise=uniform_noise,
                 replace=replace,
+                source_cache=src_stereo,
             )
 
             pred_anti = _logits(anti_outputs)
