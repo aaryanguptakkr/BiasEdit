@@ -8,7 +8,7 @@ Standard causal tracing: corrupt the subject tokens of one model, restore one
 hidden state at a time, measure how much the bias-consistent prediction recovers.
 
 Per checkpoint  →  plots/{model}/{label}/
-    {domain}-states.pdf         full / Attn-severed / MLP-severed bars per layer
+    {domain}-states.pdf         full / MLP-window / Attn-window restore bars per layer
     {domain}-words.pdf          bias-word / pre-blank / blank-token bars per layer
     composite-states.pdf        all 4 domains side-by-side (states)
     composite-words.pdf         all 4 domains side-by-side (words)
@@ -404,8 +404,8 @@ def save_bias_delta(ckpt_stats_list, model_name, out_dir):
     """
     DELTA_LABELS = [
         'Δ Effect of single state',
-        'Δ Effect with Attn severed',
-        'Δ Effect with MLP severed',
+        'Δ Effect of MLP window restore',
+        'Δ Effect of Attn window restore',
     ]
 
     for domain in BIAS_TYPES:
@@ -424,8 +424,8 @@ def save_bias_delta(ckpt_stats_list, model_name, out_dir):
 
             def raw_arr(ckpt_s):
                 # Return (states, mlp_only, attn_only) — order matches bar chart convention:
-                # 2nd bar (red)   = mlp-only restore = 'Effect with Attn severed'
-                # 3rd bar (green) = attn-only restore = 'Effect with MLP severed'
+                # 2nd bar (red)   = restored window of MLP outputs  (_mlp.npz)
+                # 3rd bar (green) = restored window of Attn outputs (_attn.npz)
                 return (np.array(ckpt_s['states_score']),
                         np.array(ckpt_s['mlp_score']),
                         np.array(ckpt_s['attn_score']))
@@ -591,8 +591,8 @@ def save_base_vs_instruct(base_stats, instruct_stats, out_dir):
     def raw_arrays(s):
         """Return (states, mlp_only, attn_only) raw log prob diff arrays.
         Order matches bar chart convention:
-          2nd bar (red)   = mlp-only restore = 'Effect with Attn severed'
-          3rd bar (green) = attn-only restore = 'Effect with MLP severed'
+          2nd bar (red)   = restored window of MLP outputs  (_mlp.npz)
+          3rd bar (green) = restored window of Attn outputs (_attn.npz)
         """
         return (np.array(s['states_score']),
                 np.array(s['mlp_score']),
@@ -643,7 +643,7 @@ def save_base_vs_instruct(base_stats, instruct_stats, out_dir):
 
         fig.suptitle(
             f'OLMo-2-0425-1B — {domain.capitalize()} bias: Base vs. Instruct\n'
-            'Abs. log prob diff per layer  (blue = States, red = Attn severed, green = MLP severed)  '
+            'Abs. log prob diff per layer  (blue = States, red = MLP window, green = Attn window)  '
             'Y-axis fixed across all subplots.',
             fontsize=FS_SUPTITLE, fontweight='bold')
 
@@ -790,7 +790,7 @@ def save_cross_patch_direction(direction_key, domain_results, out_dir, family_la
     family_label   : display name of the model family, prepended to titles
 
     Mirrors the per-checkpoint layout used for within-model tracing:
-      {domain}-states.pdf      full / Attn-severed / MLP-severed bars per layer
+      {domain}-states.pdf      full / MLP-window / Attn-window restore bars per layer
       {domain}-words.pdf       bias-word / pre-blank / blank-token bars per layer
       composite-states.pdf     all 4 domains side-by-side
       composite-words.pdf
@@ -1542,7 +1542,7 @@ def save_appendix_A3_nie_lines(out_dir, num_sample=None, main_zf=None):
         for d in PAPER_DOMAINS}
 
     STATES_KEYS   = ('bias', 'mlp', 'attn')
-    STATES_LABELS_SHORT = ['States', 'Attn severed', 'MLP severed']
+    STATES_LABELS_SHORT = ['States', 'MLP window', 'Attn window']
     WORDS_KEYS    = ('bias', 'pre_blank', 'blank')
     WORDS_LABELS_SHORT  = [
         'Effect of subject token',
@@ -1703,7 +1703,7 @@ def save_main_body_nie_overlay(out_dir, num_sample=None, main_zf=None):
         'OLMo-2-0425-1B-Instruct', 'allenai', 'step_2000', 'gender', num_sample)
 
     SCORE_KEYS = ('states_score', 'mlp_score', 'attn_score')
-    NIE_LABELS = ['States', 'Attn severed', 'MLP severed']
+    NIE_LABELS = ['States', 'MLP window', 'Attn window']
 
     def _nie(res, key):
         key_map = {'states_score': 'bias_mean', 'mlp_score': 'mlp_mean', 'attn_score': 'attn_mean'}
@@ -1814,7 +1814,7 @@ def save_main_body_pre_post_crosspatch(out_dir, num_sample=None, main_zf=None):
 
     # (a) within-model overlay: 3 conditions, Pre solid / Post dashed
     COND_KEYS   = ('bias', 'mlp', 'attn')
-    COND_LABELS = ['States', 'Attn severed', 'MLP severed']
+    COND_LABELS = ['States', 'MLP window', 'Attn window']
 
     # (b) States-only, four distinct colors
     B_SERIES = [
@@ -1942,7 +1942,7 @@ def save_crosspatch_nie_overlay(out_dir, num_sample=None, main_zf=None):
     p2pre_results  = {d: load_cross_patch_domain('post_to_pre', d, num_sample) for d in PAPER_DOMAINS}
 
     STATES_KEYS = ('bias', 'mlp', 'attn')
-    STATES_LABELS_SHORT = ['States', 'Attn severed', 'MLP severed']
+    STATES_LABELS_SHORT = ['States', 'MLP window', 'Attn window']
     WORDS_KEYS  = ('bias', 'pre_blank', 'blank')
     WORDS_LABELS_SHORT  = ['Effect of subject token', 'Effect of pre-target token', 'Effect of target token']
 
@@ -2197,7 +2197,7 @@ def save_appendix_A5_trajectory(base_stats, instruct_stats, out_dir):
 def save_appendix_A6_heatmap(base_stats, instruct_stats, out_dir, num_sample=None):
     """
     Appendix A6: 3×3 grid of NIE heatmaps.
-    Rows: states conditions (full restore, Attn-severed / MLP-only, MLP-severed / Attn-only).
+    Rows: states conditions (full restore, MLP-window restore, Attn-window restore).
     Columns: domains (gender, race, profession).
     X-axis: training checkpoints (base pre-training | instruct fine-tuning).
     Y-axis: layer (0–15).
@@ -2210,8 +2210,8 @@ def save_appendix_A6_heatmap(base_stats, instruct_stats, out_dir, num_sample=Non
     A6_FS_CBAR   = FS_TICK   + 2   # 10
 
     # (display label, stats.json key, load_within_model_from_local dict key)
-    # attn_score in stats = _attn.npz = Attn-only restore = MLP-severed condition
-    # mlp_score  in stats = _mlp.npz  = MLP-only restore  = Attn-severed condition
+    # attn_score in stats = _attn.npz = restored window of Attn outputs
+    # mlp_score  in stats = _mlp.npz  = restored window of MLP outputs
     conditions = [
         (STATES_LABELS[0], 'states_score', 'bias_mean'),
         (STATES_LABELS[1], 'mlp_score',    'mlp_mean'),

@@ -188,10 +188,20 @@ PAPER_DOMAINS = ['gender', 'race', 'profession']  # domains used in paper figure
 # computation; see normalized_indirect_effect() for the degenerate-gap policy.
 LOW_SIGNAL = 0.03
 
+# These name what the pipeline actually computes. The three bars are, in order,
+# res['bias_mean'], res['mlp_mean'], res['attn_mean'] — a single restored hidden state,
+# then a restored WINDOW of MLP outputs, then a restored window of attention outputs
+# (trace_important_window, `window` layers wide, from the _mlp.npz / _attn.npz runs).
+#
+# They were previously labelled "Effect with Attn severed" / "Effect with MLP severed",
+# which was wrong twice over: the two bars were named for the opposite sublayer to the one
+# their data comes from, and "severed" is ROME's term for a different experiment entirely —
+# holding a sublayer frozen at its corrupted value while a single state is restored
+# (ROME §2.2 / Fig. 3, implemented by trace_with_repatch, which this pipeline never calls).
 STATES_LABELS = [
     'Effect of single state',
-    'Effect with Attn severed',
-    'Effect with MLP severed',
+    'Effect of MLP window restore',
+    'Effect of Attn window restore',
 ]
 WORDS_LABELS = [
     'Effect of subject token',     # bias_mean       — subject (bias attribute) token positions
@@ -199,7 +209,7 @@ WORDS_LABELS = [
     'Effect of target token',      # blank_mean      — prediction target token positions
 ]
 
-# Standardized bar colors: blue (full restore), red (Attn severed / MLP-only), green (MLP severed / Attn-only)
+# Standardized bar colors: blue (single-state restore), red (MLP window restore), green (Attn window restore)
 BAR_COLORS    = ['#1f77b4', '#d62728', '#2ca02c']  # states bars
 STATES_COLORS = BAR_COLORS                          # alias used in appendix grids
 WORDS_COLORS  = ['#9467bd', '#ff7f0e', '#17becf']  # distinct palette for words bars

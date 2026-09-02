@@ -55,9 +55,12 @@ end   = len(encode(context_before_word + word))
   `<|fim_pad|>`). The survey found **no repo** that does this — it would be an invented
   convention. ROME/MEMIT use no placeholder at all; upstream zjunlp/BiasEdit uses
   unk-masking only for masked LMs and direct word substitution for causal LMs.
-- The unk-mask path (`stereoset.py` -> `make_inputs` unk search) remains untouched for
-  OLMo/Pythia/GPT-2. Note Qwen2.5 and Llama-3.2 have `unk_token = None`, so the old path
-  cannot run on them even in principle.
+- ~~The unk-mask path remains untouched for OLMo/Pythia/GPT-2.~~ **No longer true.** The
+  unk-twin search was deleted in `7433028`; `stereoset.py` now locates the BLANK by the same
+  length-difference method (`word_span`) for every causal model, and `anti_mask == anti`
+  (no masking at all). The masked-LM branch is gone with it. Retained here only to explain
+  why Qwen2.5 and Llama-3.2, whose `unk_token` is `None`, were never compatible with the
+  old path.
 - Each computed span is validated by decoding: `decode(ids[start:end]).strip() == word`;
   mismatching samples are logged with their ID and skipped (per-domain coverage reported).
 
@@ -78,7 +81,28 @@ by design, since corruption happens in the target's embedding space.
 Llama-7B and fine-tuned variants — the citable precedent that same-architecture
 base<->tuned activations are compatible. No established convention exists for dtype/hook
 alignment in cross-patching (our pairs are same-architecture, so hooks/dims align
-trivially; both sides loaded in bf16).
+trivially).
+
+**dtype is per-model, not uniform.** `get_dtype()` in `experiments/bias_trace.py` loads each
+model at the precision its own HuggingFace config declares. Verified against the configs for
+the six families that have results:
+
+| model | dtype |
+|---|---|
+| OLMo-2-0425-1B | **fp32** |
+| OLMo-2-0425-1B-Instruct | **bf16** |
+| pythia-1b | fp16 |
+| Qwen2.5-1.5B / Llama-3.2-1B / gemma-3-1b | bf16 |
+
+`get_dtype` also covers the older `--model_source` choices that have no results here — llama-2
+and gpt-j at fp16, the gpt-2 family at fp32 (their configs declare no `torch_dtype`, and fp32
+is what HuggingFace loads by default). Those branches are untested against real runs.
+
+Consequence to disclose: the OLMo base<->instruct pair — the pair the main cross-patching
+result rests on — therefore injects fp32-computed states into a bf16 model in the pre->post
+direction, and bf16 into fp32 in post->pre. Precision is not held constant across that pair.
+The Qwen, Llama and Gemma pairs are bf16 on both sides. (An earlier version of this section
+claimed "both sides loaded in bf16", which was true only of those three.)
 
 ### 5. Model-specific facts
 
