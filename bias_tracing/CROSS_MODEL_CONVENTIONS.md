@@ -116,9 +116,19 @@ claimed "both sides loaded in bf16", which was true only of those three.)
 | module paths | `model.layers.N{.self_attn,.mlp}` (all three; existing `layername()` llama branch covers them) | | |
 | HF gating | open | **gated (pending approval)** | gated (granted) |
 
-`window=10` kept fixed for comparability with existing OLMo/Pythia results (ROME
-precedent); depth fraction differs across models (10/16 vs 10/26 vs 10/28) — disclose.
-Per-case `.npz` caching means a scaled-window ablation can be added later incrementally.
+The MLP/Attn restoration window is no longer fixed at 10. It defaults to
+`2*floor(num_layers/8)+1` — 5 layers at 16, 7 at 26 and 28, 9 at 32 — which holds it near a
+quarter of depth across models (ROME used 10 of GPT-2 XL's 48, ~21%). A fixed 10 was 62% of a
+16-layer model, so each bar covered most of the network. Odd widths are also exactly centred;
+`range(l - w//2, l - (-w//2))` centres on `l` only for odd `w`, so the old 10 spanned
+`l-5..l+4`. `--window 10` reproduces the previous behaviour for comparison against the
+archived runs, and the width used is recorded in every `.npz` and in the cache-compatibility
+key, so widths cannot be mixed within one result directory or one figure.
+
+Edge effect to disclose: near the boundaries the window is truncated — at w=5, layer 0
+restores 3 layers where layer 8 restores 5 — so boundary bars restore strictly less. That
+matters here because the headline result is a peak at L0, the one layer whose window is
+clipped.
 
 ### 6. Known risks / open items
 

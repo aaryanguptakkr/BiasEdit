@@ -364,6 +364,10 @@ def result_metadata(data):
         )
     return {
         'score_metric': _metadata_value(data, 'score_metric'),
+        # Width of the MLP/Attn restoration window. Mixing widths in one figure compares
+        # different experiments, so it belongs in the compatibility key alongside the
+        # metric and the models.
+        'window': _metadata_value(data, 'window'),
         'source_model': _metadata_value(data, 'source_model'),
         'target_model': _metadata_value(data, 'target_model'),
         'source_revision': _metadata_value(data, 'source_revision'),

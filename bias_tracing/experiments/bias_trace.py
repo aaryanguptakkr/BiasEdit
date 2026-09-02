@@ -297,7 +297,16 @@ def main():
                     cached_result.get("source_revision", "<missing>")).item())
                 cached_target_revision = str(numpy.asarray(
                     cached_result.get("target_revision", "<missing>")).item())
+                # The restoration window only enters the mlp/attn paths, so a
+                # single-state file is compatible whatever width produced it. For the
+                # windowed kinds a different width is a different experiment: without
+                # this, two runs at different widths share an output directory (modeldir
+                # carries noise, replace, model and domain, not window) and the second
+                # would silently reuse the first's _mlp/_attn files.
+                cached_window = int(numpy.asarray(cached_result.get("window", -1)).item())
+                window_ok = (kind is None) or (cached_window == window)
                 if (cached_metric == SCORE_METRIC and
+                        window_ok and
                         cached_source == args.model_source and
                         cached_target == args.model_target and
                         cached_source_revision == (args.branch1 or "") and
