@@ -30,6 +30,15 @@ MAIN_ZIP   = f'/deepfreeze/share/{name3}/bias_tracing/main.zip'
 LOCAL_BASE = f'/deepfreeze/{name1}/{name2}/BiasEdit/bias_tracing/results'
 PLOTS_BASE = f'/deepfreeze/{name1}/{name2}/BiasEdit/bias_tracing/plots'
 
+# Shared results root. New runs write here and plotting reads from here, so the two
+# do not drift apart and nothing depends on a particular checkout's layout. The path
+# itself lives in private_names.py (gitignored) because it differs per machine; the
+# fallback is the location the OLMo cross-patch results already occupy.
+try:
+    from private_names import shared_results_root as SHARED_RESULTS
+except ImportError:
+    SHARED_RESULTS = f'/deepfreeze/share/{name4}/results'
+
 # ── model references ──────────────────────────────────────────────────────────
 
 BASE_MODEL = 'OLMo-2-0425-1B'
@@ -91,30 +100,26 @@ MODEL_CONFIGS = {
 # Runs exist for several model families. scripts/cross_patch.sh writes all of
 # them below the repository-local results tree, so plotting reads the same root.
 
-CROSS_PATCH_BASE       = f'{LOCAL_BASE}/cross_patch'
-CROSS_PATCH_LOCAL_BASE = CROSS_PATCH_BASE
+CROSS_PATCH_BASE       = f'{SHARED_RESULTS}/cross_patch'
+CROSS_PATCH_LOCAL_BASE = f'{LOCAL_BASE}/cross_patch'   # older runs written into the checkout
 
 CROSS_PATCH_FAMILIES = {
     'olmo_1b': {
-        'base': CROSS_PATCH_BASE,
         'label': 'OLMo-2 1B',
         'base_model': 'allenai/OLMo-2-0425-1B',
         'instruct_model': 'allenai/OLMo-2-0425-1B-Instruct',
     },
     'qwen2.5_1.5b': {
-        'base': CROSS_PATCH_LOCAL_BASE,
         'label': 'Qwen2.5 1.5B',
         'base_model': 'Qwen/Qwen2.5-1.5B',
         'instruct_model': 'Qwen/Qwen2.5-1.5B-Instruct',
     },
     'llama3.2_1b': {
-        'base': CROSS_PATCH_LOCAL_BASE,
         'label': 'Llama-3.2 1B',
         'base_model': 'meta-llama/Llama-3.2-1B',
         'instruct_model': 'meta-llama/Llama-3.2-1B-Instruct',
     },
     'gemma3_1b': {
-        'base': CROSS_PATCH_LOCAL_BASE,
         'label': 'Gemma-3 1B',
         'base_model': 'google/gemma-3-1b-pt',
         'instruct_model': 'google/gemma-3-1b-it',
@@ -138,9 +143,20 @@ CROSS_PATCH_CONFIGS = {
 
 
 def cross_patch_cases_dir(family, direction_key, domain):
-    fam = CROSS_PATCH_FAMILIES[family]
-    return os.path.join(fam['base'], f'{family}_{direction_key}',
-                        domain, 'causal_trace', 'cases')
+    """Locate one cross-patch run's cases directory.
+
+    New runs are written under SHARED_RESULTS (see private_names.shared_results_root),
+    so that is checked first. Older runs that were written into a checkout are still
+    found under LOCAL_BASE, which keeps existing results usable without moving 697 MB
+    around. If neither exists the shared path is returned, so the caller's "no
+    directory" message names the location a new run would use.
+    """
+    rel = os.path.join(f'{family}_{direction_key}', domain, 'causal_trace', 'cases')
+    for root in (CROSS_PATCH_BASE, CROSS_PATCH_LOCAL_BASE):
+        candidate = os.path.join(root, rel)
+        if os.path.isdir(candidate):
+            return candidate
+    return os.path.join(CROSS_PATCH_BASE, rel)
 
 # ── style constants ───────────────────────────────────────────────────────────
 

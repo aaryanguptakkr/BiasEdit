@@ -13,6 +13,20 @@
 
 set -m
 
+# Results go to the shared root, not into a checkout, so they outlive any one clone
+# and plotting finds them without knowing whose working copy produced them. The path
+# is read from private_names.py (gitignored) — the same value plot_utils reads, so the
+# writer and the reader cannot drift apart. Override with RESULTS_ROOT=... if needed.
+if [[ -z "$RESULTS_ROOT" ]]; then
+    RESULTS_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && python -c \
+        "from private_names import shared_results_root as r; print(r)" 2>/dev/null)
+fi
+if [[ -z "$RESULTS_ROOT" ]]; then
+    echo "cannot determine RESULTS_ROOT: set it, or define shared_results_root in private_names.py" >&2
+    exit 1
+fi
+echo "Results root: $RESULTS_ROOT"
+
 if [[ $# -lt 4 || $# -gt 6 ]]; then
     echo "usage: $0 <base_model> <instruct_model> <family_tag> <gpu_id> [base_revision] [instruct_revision]"
     exit 1
@@ -43,7 +57,7 @@ run_experiment() {
         ${BASE_REV:+--branch1="$BASE_REV"} \
         ${INSTRUCT_REV:+--branch2="$INSTRUCT_REV"} \
         --bias_file="data/domain/$domain.json" \
-        --output_dir="results/cross_patch/${FAMILY}_pre_to_post/$domain/causal_trace"
+        --output_dir="$RESULTS_ROOT/cross_patch/${FAMILY}_pre_to_post/$domain/causal_trace"
 
     python experiments/bias_trace.py \
         --model_source="$INSTRUCT" \
@@ -51,7 +65,7 @@ run_experiment() {
         ${INSTRUCT_REV:+--branch1="$INSTRUCT_REV"} \
         ${BASE_REV:+--branch2="$BASE_REV"} \
         --bias_file="data/domain/$domain.json" \
-        --output_dir="results/cross_patch/${FAMILY}_post_to_pre/$domain/causal_trace"
+        --output_dir="$RESULTS_ROOT/cross_patch/${FAMILY}_post_to_pre/$domain/causal_trace"
 
     echo "[FINISH] $FAMILY - Domain: $domain"
 }
