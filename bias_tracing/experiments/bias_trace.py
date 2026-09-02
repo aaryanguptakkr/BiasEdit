@@ -124,6 +124,13 @@ def main():
     aa("--replace", default=0, type=int)
     aa("--pattern", default="all", choices=["all", "one"], type=str)
     aa("--samples", default=10, type=int)
+    # MLP/Attn restoration window, in layers. Default scales with model depth:
+    # 2*floor(num_layers/8)+1 -> 5 layers at 16, 7 at 26-28, 9 at 32.
+    # ROME used 10 on GPT-2 XL's 48 layers (21% of depth); a fixed 10 here would be
+    # 62% of a 16-layer model, so every "layer" bar would be most of the network.
+    # Odd values are also symmetric: range(l - w//2, l - (-w//2)) centres on l only
+    # when w is odd, so the previous default of 10 spanned l-5..l+4, off-centre by one.
+    aa("--window", default=None, type=int)
     args = parser.parse_args()
 
     if args.model_name is not None:
@@ -171,6 +178,11 @@ def main():
     mt_source = ModelAndTokenizer(args.model_source, torch_dtype=torch_dtype_source, branch=args.branch1)
     mt_target = ModelAndTokenizer(args.model_target, torch_dtype=torch_dtype_target, branch=args.branch2)
     validate_model_pair(mt_source, mt_target)
+
+    window = args.window if args.window is not None else max(3, 2 * (mt_target.num_layers // 8) + 1)
+    if args.window is None:
+        print(f"Using window {window} for {mt_target.num_layers} layers "
+              f"({100 * window / mt_target.num_layers:.0f}% of depth)")
 
     # Embedding
     subjects = json.load(open(args.subject_file))
@@ -315,6 +327,7 @@ def main():
                     noise=noise_level,
                     uniform_noise=uniform_noise,
                     replace=args.replace,
+                    window=window,
                     kind=kind,
                 )
                 if not result:
