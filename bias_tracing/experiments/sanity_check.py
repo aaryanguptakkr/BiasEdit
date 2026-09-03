@@ -328,6 +328,29 @@ for knowledge in ds:
     if not result:
         skipped += 1
         continue
+
+    # Exercise the windowed path too. Only kind=None was covered before, which left both
+    # the depth-scaled --window default and the windowed half of the source-activation
+    # cache untested here -- and the window is the one thing that distinguishes these two
+    # kinds. Run once on the first usable case: it is a smoke check, not a per-case cost.
+    if traced == 0:
+        window = max(3, 2 * (mt_t.num_layers // 8) + 1)
+        for kind in ("mlp", "attn"):
+            windowed = calculate_hidden_flow(
+                mt_s, mt_t, knowledge,
+                ia[0], is_[0], ia[1], is_[1], ia[2], is_[2], ia[3], is_[3],
+                noise=noise_level, window=window, kind=kind,
+            )
+            shape = tuple(windowed["scores"].shape)
+            assert shape == tuple(result["scores"].shape), (
+                f"{kind}: scores shape {shape} != single-state {tuple(result['scores'].shape)}"
+            )
+            assert int(numpy.asarray(windowed["window"]).item()) == window, (
+                f"{kind}: window not recorded in the result"
+            )
+            assert torch.isfinite(windowed["scores"]).all(), f"{kind}: non-finite scores"
+        print(f"  [{traced}] windowed path OK (window={window} for {mt_t.num_layers} layers, "
+              f"mlp and attn, shapes and finiteness checked)")
     out_path = os.path.join(args.output_dir, f"sanity_{knowledge['id']}.npz")
     numpy.savez(out_path, **{
         k: v.detach().to(torch.float32).cpu().numpy() if torch.is_tensor(v) else v

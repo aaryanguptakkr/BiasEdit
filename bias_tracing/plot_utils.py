@@ -11,6 +11,8 @@ Scripts in scripts/ need to add the parent directory to sys.path:
 
 import os
 import io
+import glob
+import functools
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
@@ -142,21 +144,32 @@ CROSS_PATCH_CONFIGS = {
 }
 
 
-def cross_patch_cases_dir(family, direction_key, domain):
-    """Locate one cross-patch run's cases directory.
+@functools.lru_cache(maxsize=None)
+def cross_patch_family_root(family):
+    """Pick ONE root for a whole family, not per domain.
 
-    New runs are written under SHARED_RESULTS (see private_names.shared_results_root),
-    so that is checked first. Older runs that were written into a checkout are still
-    found under LOCAL_BASE, which keeps existing results usable without moving 697 MB
-    around. If neither exists the shared path is returned, so the caller's "no
-    directory" message names the location a new run would use.
+    New runs are written under SHARED_RESULTS (private_names.shared_results_root);
+    older runs still sit inside a checkout, so LOCAL_BASE is the fallback. The choice
+    is made once per family and applies to every direction and domain within it.
+
+    Resolving per (family, direction, domain) would look fine today and break on the
+    first partial regeneration: a family with gender regenerated into the shared root
+    and race still in the checkout would silently combine window 5 with window 10, and
+    the new metric with the legacy one, inside a single composite figure.
+    validate_score_files compares files within one group and never across families, so
+    nothing downstream would catch it. Choosing one root per family turns that into a
+    visible missing-directory message for the domains not yet regenerated.
     """
-    rel = os.path.join(f'{family}_{direction_key}', domain, 'causal_trace', 'cases')
     for root in (CROSS_PATCH_BASE, CROSS_PATCH_LOCAL_BASE):
-        candidate = os.path.join(root, rel)
-        if os.path.isdir(candidate):
-            return candidate
-    return os.path.join(CROSS_PATCH_BASE, rel)
+        if glob.glob(os.path.join(root, f'{family}_*')):
+            return root
+    return CROSS_PATCH_BASE
+
+
+def cross_patch_cases_dir(family, direction_key, domain):
+    """Locate one cross-patch run's cases directory, under its family's single root."""
+    return os.path.join(cross_patch_family_root(family),
+                        f'{family}_{direction_key}', domain, 'causal_trace', 'cases')
 
 # ── style constants ───────────────────────────────────────────────────────────
 
