@@ -1,7 +1,7 @@
 import argparse
 import json
 import os, sys
-import time, datetime
+import datetime
 # os.chdir(sys.path[0])
 sys.path.append("./")
 import re
@@ -17,12 +17,10 @@ from transformers import (
     LlamaTokenizer, 
     LlamaForCausalLM,
     GPT2Tokenizer,
-    GPT2LMHeadModel
 )
 
 from dsets import StereoSetDataset
 from util import nethook
-from tqdm import tqdm
 
 # Three readings of the same forward passes. `scores`/`high_score`/`low_score` hold the
 # FIRST one, so those keys mean exactly what they mean in every pre-2026-08 result file.
@@ -206,7 +204,6 @@ def main():
             uniform_noise = True
             noise_level = float(noise_level[1:])
 
-    run_start = time.time()
     run_log_path = "results/run_log.jsonl"
     os.makedirs("results", exist_ok=True)
     domain = args.bias_file.split("/")[-1].split(".")[0]
@@ -362,9 +359,6 @@ def main():
                     for k, v in result.items()
                 }
                 numpy.savez(filename, **numpy_result)
-            # if not numpy_result["correct_prediction"]:
-            #     tqdm.write(f"Skipping {knowledge['prompt']}")
-            #     continue
             plot_result = dict(numpy_result)
             plot_result["kind"] = kind
             pdfname = f'{pdf_dir}/{known_id}_{str("_".join(numpy_result["subject"])).strip()}_{kind_suffix}'

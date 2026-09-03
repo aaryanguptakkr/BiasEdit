@@ -3,8 +3,6 @@ import string
 
 from torch.utils.data import Dataset
 
-from util.globals import *
-
 
 class StereoSetDataset(Dataset):
     """StereoSet intrasentence samples for causal-LM bias tracing.
