@@ -178,6 +178,11 @@ def main():
     validate_model_pair(mt_source, mt_target)
 
     window = args.window if args.window is not None else max(3, 2 * (mt_target.num_layers // 8) + 1)
+    if window < 1 or window % 2 == 0:
+        # width 0 makes the layer list empty, so trace_with_patch patches nothing and
+        # every mlp/attn cell silently reports the corrupted baseline; even widths sit
+        # half a layer off-centre, which is what the odd default exists to avoid.
+        parser.error(f"--window must be a positive odd number of layers (got {window})")
     if args.window is None:
         print(f"Using window {window} for {mt_target.num_layers} layers "
               f"({100 * window / mt_target.num_layers:.0f}% of depth)")
@@ -1138,11 +1143,12 @@ def make_inputs(mt, prompts, labels, subject=None, device="cuda", blank_idxs=Non
 
     subject_range = []
     for subj in subject or []:
-        sr = find_token_range(mt.tokenizer, inputs["input_ids"][0], subj, prompts[0])
-        if sr is None:
+        srs = find_token_ranges(mt.tokenizer, inputs["input_ids"][0], subj, prompts[0])
+        if not srs:
             print(f"Subject {subj!r} was not found as a complete word in {prompts[0]!r}")
             return None, None, None, None
-        subject_range.append(sr)
+        subject_range.extend(srs)
+    subject_range = merge_token_ranges(subject_range)
 
     if blank_idxs is None:
         print(f"BLANK span was not verified for {prompts[0]!r}")
@@ -1169,57 +1175,95 @@ def decode_tokens(tokenizer, token_array):
     return [tokenizer.decode([t]) for t in token_array]
 
 
+def find_complete_words(text, substring):
+    """Every complete-word occurrence of `substring` in `text`, in order."""
+    if substring is None:
+        return []
+    return list(re.finditer(rf"(?<!\w){re.escape(substring)}(?!\w)", text))
+
+
 def find_complete_word(text, substring):
-    if substring is None:
-        return None
-    return re.search(rf"(?<!\w){re.escape(substring)}(?!\w)", text)
+    """The first complete-word occurrence, or None."""
+    matches = find_complete_words(text, substring)
+    return matches[0] if matches else None
 
 
-def find_token_range(tokenizer, token_array, substring, text=None):
-    """Locate the first complete-word occurrence and return its token range [start, end)."""
+def merge_token_ranges(ranges):
+    """Sort and merge overlapping [start, end) ranges.
+
+    trace_with_patch adds a fresh noise draw per span, so a token covered by two
+    spans would be corrupted twice at sqrt(2) the intended magnitude. Merging
+    first makes the corruption exactly one draw per token.
+    """
+    merged = []
+    for start, end in sorted(ranges):
+        if merged and start < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def find_token_ranges(tokenizer, token_array, substring, text=None):
+    """Token ranges [start, end) of EVERY complete-word occurrence of `substring`.
+
+    A subject named twice must be corrupted at both mentions. Noising only the
+    first leaves an intact copy -- "My father is a very mean father." would keep
+    the second "father" clean -- and the model reads the subject identity straight
+    off it, so the corrupted condition is not corrupted at all. 36 StereoSet cases
+    (25 gender, 11 profession) repeat a subject word this way.
+    """
     if substring is None:
-        return None
+        return []
 
     if text is not None:
-        match = find_complete_word(text, substring)
-        if match is None:
-            return None
+        matches = find_complete_words(text, substring)
+        if not matches:
+            return []
         try:
             encoded = tokenizer(text, return_offsets_mapping=True)
-            encoded_ids = encoded["input_ids"]
             token_ids = token_array.tolist() if hasattr(token_array, "tolist") else list(token_array)
-            if encoded_ids != token_ids:
-                return None
-            token_idxs = [
-                idx for idx, (start, end) in enumerate(encoded["offset_mapping"])
-                if start < match.end() and end > match.start()
-            ]
-            if not token_idxs:
-                return None
-            return (token_idxs[0], token_idxs[-1] + 1)
+            if encoded["input_ids"] != token_ids:
+                return []
+            ranges = []
+            for match in matches:
+                token_idxs = [
+                    idx for idx, (start, end) in enumerate(encoded["offset_mapping"])
+                    if start < match.end() and end > match.start()
+                ]
+                if token_idxs:
+                    ranges.append((token_idxs[0], token_idxs[-1] + 1))
+            return ranges
         except (NotImplementedError, TypeError):
             pass
 
-    # Slow-tokenizer fallback: retain the existing decode mapping, but match a
-    # complete word instead of an arbitrary substring.
+    # Slow-tokenizer fallback: no character offsets, so map the decoded string back
+    # to token indices by accumulating token lengths.
     toks = decode_tokens(tokenizer, token_array)
     whole_string = "".join(toks)
-    match = find_complete_word(whole_string, substring)
-    if match is None:
-        return None
+    ranges = []
+    for match in find_complete_words(whole_string, substring):
+        loc = 0
+        tok_start, tok_end = None, None
+        for i, t in enumerate(toks):
+            loc += len(t)
+            if tok_start is None and loc > match.start():
+                tok_start = i
+            if tok_end is None and loc >= match.end():
+                tok_end = i + 1
+                break
+        if tok_start is not None and tok_end is not None:
+            ranges.append((tok_start, tok_end))
+    return ranges
 
-    loc = 0
-    tok_start, tok_end = None, None
-    for i, t in enumerate(toks):
-        loc += len(t)
-        if tok_start is None and loc > match.start():
-            tok_start = i
-        if tok_end is None and loc >= match.end():
-            tok_end = i + 1
-            break
-    if tok_start is None or tok_end is None:
-        return None
-    return (tok_start, tok_end)
+
+def find_token_range(tokenizer, token_array, substring, text=None):
+    """First complete-word occurrence as a token range, or None.
+
+    Kept for callers that want exactly one span (experiments/sanity_check.py).
+    """
+    ranges = find_token_ranges(tokenizer, token_array, substring, text)
+    return ranges[0] if ranges else None
 
 
 
