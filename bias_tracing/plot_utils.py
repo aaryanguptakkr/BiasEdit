@@ -251,7 +251,7 @@ def signed_gap_reliable(effect_gap_signed, low_signal=LOW_SIGNAL):
 # which was wrong twice over: the two bars were named for the opposite sublayer to the one
 # their data comes from, and "severed" is ROME's term for a different experiment entirely —
 # holding a sublayer frozen at its corrupted value while a single state is restored
-# (ROME §2.2 / Fig. 3, implemented by trace_with_repatch, which this pipeline never calls).
+# (ROME §2.2 / Fig. 3 -- an experiment this pipeline does not run).
 STATES_LABELS = [
     'Effect of single state',
     'Effect of MLP window restore',
