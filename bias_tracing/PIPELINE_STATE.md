@@ -1,16 +1,41 @@
 # Pipeline State — Signed NIE, Cross-Model Anchoring, and What's Safe to Claim
 
 **Date:** 2026-09-11. **Scope:** `experiments/bias_trace.py`, `plot_utils.py`, `fig.py`,
-`scripts/table.py`, as of commit `86d451b` on `main`. Written to be read by whoever
-writes the paper next — it says what changed, why, what you can cite as a result, and
-what's still an open question rather than a settled fact.
+`scripts/table.py`, as of commit `bbad255` on `main`. Written for a reader who has
+never seen this pipeline before: what it computes, why, what changed this session,
+what's safe to put in the paper, and where the sharp edges are — with real numbers
+from actual runs, not invented ones, except where explicitly marked "illustrative."
+
+---
+
+## 0. The whole pipeline, in one picture
+
+```mermaid
+flowchart TD
+    A["StereoSet sentence pair\nstereo: '...she is hysterical.'\nanti: '...she is strong.'"]
+    A --> B["Locate subject-word tokens\n(e.g. 'father') and the\nBLANK fill-word tokens"]
+    B --> C["CLEAN forward pass\n(no corruption)"]
+    B --> D["CORRUPT: add Gaussian noise\nto the subject-token embeddings\n(fixed seed -> reproducible)"]
+    C --> E["high_score, high_score_signed\n(the model's own clean preference)"]
+    D --> F["CORRUPTED forward pass"]
+    F --> G["low_score, low_score_signed\n(preference after corruption)"]
+    D --> H["For EVERY (token, layer):\nrestore that ONE clean state,\nre-run the corrupted forward"]
+    H --> I["restored_score, restored_score_signed\n(one value per token per layer)"]
+    E & G & I --> J["ALP = abs(restored_signed)\nmagnitude only -> 'where is bias'"]
+    E & G & I --> K["NIE = (restored_signed - low_signed)\n/ (high_signed - low_signed)\ndirection-aware -> 'which way, how much'"]
+    J --> L["collect_scores(signed=False)\npooled across all cases -> ALP bar charts"]
+    K --> M["collect_scores(signed=True)\npooled across all cases,\nguarded by signed_gap_reliable()\n-> NIE tables / trajectory plots"]
+```
+
+Everything below fills in the boxes with real numbers and explains the two places
+(`H`→`I` for cross-model, and the `K`/`M` pooling step) where the picture above hides
+a real problem.
 
 ---
 
 ## 1. Two metrics — keep them separate in your head and in the writing
 
-Every result file now carries two independent readings of the same forward passes.
-They answer different questions and should never be described with the same word.
+Every result file carries two independent readings of the same forward passes.
 
 | | **ALP** (Absolute Log-Prob Diff) | **NIE** (Normalized Indirect Effect) |
 |---|---|---|
@@ -21,7 +46,7 @@ They answer different questions and should never be described with the same word
 | Direction-aware? | No — a state that restores the anti-stereotype scores the same as one that restores the stereotype | Yes — that's the entire reason the signed chain exists |
 
 **Why both exist, in one sentence for the paper:** ALP tells you the layer/token
-*localizes* something; NIE (signed) tells you *whether restoring it pushes the model
+*localizes* something; signed NIE tells you *whether restoring it pushes the model
 toward or away from the stereotype it started with*. A layer can have high ALP and
 near-zero signed NIE (it moves the score, but roughly as often toward the
 anti-stereotype as the stereotype across cases) — that's not a contradiction, it's the
@@ -29,199 +54,268 @@ whole point of keeping the two separate.
 
 ---
 
-## 2. What changed this session, in order
+## 2. Worked example 1 — within-model tracing on one real case
 
-All on `main`, no separate branches. Read the commit messages for full technical
-detail — this is the one-paragraph version of each.
+Real case, real numbers, from `results/allenai/OLMo-2-0425-1B/main/gender/causal_trace/cases/knowledge_f6f70a1dfd48cf2694ecff300548492b.npz` (base OLMo-2-0425-1B, no fine-tuning).
 
-1. **`05c6f5f` — Added the signed chain to plotting.** `collect_scores()` and
-   `normalized_indirect_effect()` gained a `signed=` flag. Before this, NIE existed
-   in name only — the code computed it from the abs chain, which makes it a pure
-   rescaling of ALP (no new information; a state that flips the model toward the
-   anti-stereotype scored identically to one that restores the stereotype).
-2. **`3d00194` → reverted in `3bed2ca` — ROME Fig. 3 "severing."** Explored adding a
-   necessity-test (force a state back to its corrupted value *after* restoring others,
-   to ask "is this state required," not just "is it sufficient"). Built and verified
-   logic-only (toy model, no GPU), but never wired to a driver or CLI — no experiment
-   ever used it. Removed rather than left half-built; if this is wanted later, the
-   design and the specific bug it was built to avoid (a shared-RandomState issue in
-   the old, also-removed `trace_with_repatch`) are written down in `3d00194`'s message
-   for reference.
-3. **`634d94b` — `scripts/table.py`'s comparison table moved to signed NIE**, through
-   the same shared function as everywhere else, rather than its own inline abs-chain
-   computation.
-4. **`7aec69b`, `89ba02e` — two bug fixes** surfaced by testing the above: a crash
-   (not a graceful "n/a") on any result file without the signed chain, and a
-   pre-existing, unrelated `IndexError` on single-domain figure runs.
-5. **`b085ecd` — the pooling-noise-amplification fix (see §4 below).** Signed NIE
-   pools raw values across cases with no per-case sign alignment (deliberate — see
-   §4). That pooling can produce a near-zero *denominator* even when no individual
-   case is degenerate, and dividing by a near-zero denominator manufactures large,
-   fake-looking per-layer "effects." Added `signed_gap_reliable()` — reuses the
-   existing `LOW_SIGNAL = 0.03` cutoff (already calibrated for the identical failure
-   mode on the abs chain) as a display-time gate: a domain whose pooled signed gap
-   is too small reports NIE as unavailable instead of a wild number.
-6. **`e373d1c` — finished the rollout.** Five remaining figures (appendix grids,
-   overlays) still computed "NIE" from the abs chain — same name, different,
-   redundant-with-ALP statistic. All now use the signed chain, same guard as
-   everywhere else. Consolidated four duplicated loader functions into one shared
-   `_finalize_result_dict()` in the process — net **−16 lines** in `fig.py`, not more.
-7. **`86d451b` — resolved a stale in-code TODO** about which model's embedding std to
-   use for noise scaling (answer: always the target's — was already correct, the
-   comment just still posed it as an open question).
+**The sentence pair** (`data/domain/gender.json`, template `"My father is a BLANK."`):
+- anti-stereotype: *"My father is a **emotional**."*
+- stereotype: *"My father is a **tough**."*
+- subject = `"father"`
 
-**Net effect on `bias_trace.py` specifically: 65 lines *smaller* than before this
-session** — the only lasting change to that file is deleting dead code
-(`trace_with_repatch`, confirmed unused and confirmed buggy: it shared one
-`RandomState` across two internal passes, so its two passes never drew the same
-noise for what was supposed to be one consistent corruption).
+**Step 1 — tokenize and locate spans.** After the `<|endoftext|>` start marker OLMo
+needs glued on, the anti sentence tokenizes to:
+
+```
+idx:    0                1     2        3     4    5           6
+token: <|endoftext|>   My    father    is    a   emotional    .
+```
+
+Subject span = token **2** only (`corrupt_range_anti = [[2, 3]]`). BLANK span = token
+**5** only (`blank_idxs_anti = [5, 6]`) — this is where "emotional"/"tough" sits.
+
+**Step 2 — clean run.** Run the model normally on both sentences, score
+`P(emotional | prefix)` vs `P(tough | prefix)` (same prefix, since only the last word
+differs) via `causal_difference`. Result: `high_score = 0.7248`.
+
+**Step 3 — corrupt.** Add Gaussian noise (fixed seed, scale = 3× the embedding std)
+to token 2's embedding only, on 10 independently-noised copies of the sentence. Score
+again: `low_score = 0.7226`.
+
+Already worth pausing on: **`high − low = 0.0022`.** Corrupting "father"'s embedding
+barely moved the stereo-vs-anti preference for this case at all — this real example
+*is* one of the small-or-wrong-signed-gap cases discussed in §5. Nothing broke; this
+is what the raw data actually looks like for a large fraction of cases (see §5 for the
+population-level number).
+
+**Step 4 — restoration sweep.** For every (token, layer) — 7 tokens × 16 layers = 112
+cells — restore just that one clean hidden state into the corrupted run and re-score.
+At layer 0, restoring token 2 (the subject) alone gives a score of **0.6728** — i.e.
+*below* even the corrupted baseline (0.7226) for this particular cell, which given the
+tiny gap above is unsurprising: with almost nothing to recover, single-cell noise
+dominates. The full 16-layer row for the subject token:
+
+```
+L0     L1     L2     L3     L4     L5     L6     L7     L8     L9     L10    L11    L12    L13    L14    L15
+0.673  0.642  0.708  0.783  0.778  0.723  0.701  0.681  0.684  0.695  0.672  0.699  0.657  0.654  0.714  0.723
+```
+
+**Step 5 — aggregate.** `collect_scores` pools this row together with the equivalent
+row from every other case in the domain (681 cases for OLMo gender), then divides by
+the *pooled* `high − low` to get the plotted NIE curve — see §7 for why that pooling
+step, applied to the signed chain, needs the `signed_gap_reliable()` guard from §6.
 
 ---
 
-## 3. What you can say in the paper now, and how
+## 3. Worked example 2 — the cross-model anchoring problem, same underlying sentence
+
+Different script (`verification/cross_model_scale_probe.py`, a diagnostic probe run
+this session — not the main pipeline, and run with its own noise/sample settings, so
+the numbers below don't numerically match §2's) but the same case id, so it's the same
+real "My father is a ___" sentence pair. Direction: `pre_to_post` = base model's clean
+activations spliced into the instruct model's corrupted run.
+
+```
+high      = 1.0827   (instruct model's own clean score)
+low       = 0.3466   (instruct model's own corrupted score)
+gap       = high - low = 0.7361     <- healthy, nowhere near degenerate
+self_all  = 1.0827   (restore EVERY state from the instruct model's OWN clean run)
+cross_all = 0.1187   (restore EVERY state from the BASE model's clean run instead)
+```
+
+**`self_all == high` exactly** (to float32 rounding) — if you hand the instruct model
+back its own clean activations, it reconstructs its own clean answer perfectly. This
+proves the *splicing mechanism* is correct: `trace_with_patch` does exactly what it
+says.
+
+**`cross_all` is not between `low` and `high`.** Compute where it falls on the
+`[low, high]` scale, same way NIE would:
+
+```
+fraction = (cross_all - low) / gap = (0.1187 - 0.3466) / 0.7361 = -0.31
+```
+
+Handing the instruct model the *base* model's clean activations doesn't produce a
+weaker version of recovery — it produces a score **31% of a full gap-width below the
+corrupted baseline itself**. The denominator here (0.7361) is completely healthy; the
+problem is entirely that `cross_all` isn't a value the instruct model's own
+corrupted→clean journey would ever produce. See §8 for why, and for the full
+distribution (this one case is not an outlier in isolation — it's typical of the
+whole probe).
+
+---
+
+## 4. Within-model vs. cross-model, side by side
+
+```mermaid
+flowchart LR
+    subgraph W["Within-model (source = target)"]
+        direction TB
+        W1["Clean activation comes from\nthe SAME model's own forward pass"] --> W2["It IS a point on this model's\nown corrupted-to-clean journey"]
+        W2 --> W3["NIE is a meaningful\n0..1-ish interpolation\n(usually)"]
+    end
+    subgraph X["Cross-model (source = other training stage)"]
+        direction TB
+        X1["Clean activation comes from\na DIFFERENT model's weights"] --> X2["Target's downstream layers were\nnever trained to interpret this vector"]
+        X2 --> X3["Restored score can land\nanywhere -- below low,\nabove high, or in between"]
+    end
+```
+
+Same architecture (`validate_model_pair`'s checks: hidden size, layer count,
+tokenizer) guarantees the *shapes* line up — the patch runs without a tensor error.
+It says nothing about whether the two models' internal representations *mean* the
+same thing at that coordinate. §3's probe is base ↔ instruct of the *same* model
+family — the closest two checkpoints can be — and the mismatch still shows up.
+
+---
+
+## 5. What you can say in the paper now, and how
 
 ### Within-model localization (ALP + signed NIE)
 Mechanically sound — verified end to end (batch convention, noise reproducibility,
-patch direction, hook mechanics). Safe to report **with two caveats you should state
-explicitly, not bury**:
-- The corruption effect is often small or the wrong sign: on real OLMo-2-1B gender
-  data, median `high − low` gap is **0.046**, and **38.6%** of cases have a
-  non-positive gap (corruption didn't reduce the stereo/anti separation, or increased
-  it). This is measured, not suspected — see `review.md` B2, independently
-  reproduced this session from the raw `.npz` files.
+patch direction, hook mechanics; see §2's worked example for the mechanism in full).
+Safe to report **with two caveats you should state explicitly, not bury**:
+
+- The corruption effect is often small or the wrong sign: on the same real OLMo-2-1B
+  gender data as §2 (n=681 cases), median `high − low` gap is **0.046**, and **38.6%**
+  of cases have a non-positive gap — like §2's own example, corruption didn't reduce
+  the stereo/anti separation, or increased it. Measured directly from the `.npz`
+  files this session, matching `review.md` B2.
 - A plausible, currently untested explanation is dilution: the reported score
-  averages over the *whole sentence*, so a 1–2 token fill word is diluted across a
-  5–25 token context (`review.md` B3, `UNEQUAL_LENGTH_PROBLEM.md`). The blank-only
-  chain (`scores_blank`, `high_score_blank`, `low_score_blank`) already exists in
-  every result file specifically to test this, and has never been run as a check.
-  **This is the single cheapest experiment that would tell you whether the small-gap
-  problem is a metric artifact or a real, weaker finding — do this before writing the
-  localization section, not after.**
+  averages over the *whole sentence* (§2's example: 6 scoreable tokens for a 1-word
+  fill), so a 1–2 token fill word is diluted across a much longer context
+  (`review.md` B3, `UNEQUAL_LENGTH_PROBLEM.md`). The blank-only chain (`scores_blank`,
+  `high_score_blank`, `low_score_blank`) already exists in every result file
+  specifically to test this, and has never been run as a check. **This is the
+  cheapest experiment that would tell you whether the small-gap problem is a metric
+  artifact or a real, weaker finding — do this before writing the localization
+  section, not after.**
 
 ### Cross-model patching (base ↔ instruct)
 **Do not report cross-model NIE as a ratio, percentage, or mean/median "recovery"
-number.** Verified directly this session (`verification/cross_model_scale_probe_olmo.json`,
-real OLMo-2-1B base/instruct, real production code — not a toy or reimplementation):
-
-- The patching *mechanism* is correct: restoring every state from a model's own clean
-  run reproduces its own clean score to float32 precision (24/24 cases, error ~1e-6).
-- Restoring every state from the *other* model's clean run does **not** land inside
-  `[low, high]` most of the time (33.3% for base→instruct, 8.3% for instruct→base),
-  and when it doesn't, it isn't just "outside the range a bit" — individual cases
-  land at 20–28× the width of the entire clean-to-corrupted gap, in both directions
-  (worse than corrupted, and more extreme than clean). The mean of the 12
-  base→instruct cases is not even a stable number: dropping the single worst outlier
-  flips it from −1.00 to +1.44.
-
-**Why this isn't fixed by the pooling guard in §4:** that guard protects against a
-small *denominator*. This problem shows up on cases with a perfectly healthy
-denominator — it's the *numerator* (the cross-model restored value) that isn't
-guaranteed to mean anything on the target model's own corrupted-to-clean scale, because
-it's a value from a different model's weights, not a weaker copy of the target's own
-signal. Same architecture (`validate_model_pair`'s checks) guarantees the patch is
-*mechanically* valid — shapes line up — it says nothing about whether the two models'
-internal representations agree on what a given activation *means*.
+number.** §3 and §8 show why: the fraction lands inside `[0,1]` only 33.3%
+(base→instruct) / 8.3% (instruct→base) of the time, with individual cases 20–28× the
+gap-width outside that range in both directions, and the mean of the 12 base→instruct
+cases flips from −1.00 to +1.44 if you drop a single outlier — not a stable summary
+of anything.
 
 **What this is good evidence for, and how to phrase it:** not "bias information
-transfers incompletely between training stages" (implies a measurable degree, which
-the data doesn't show — it's not attenuated toward zero, it's scattered on both
-sides of the entire plausible range). The defensible, and more interesting, claim is:
-**forcing one training stage's subject-conditioned activations into the other
-produces effects with no consistent relationship to that model's own
-corrupted-to-clean scale — evidence that the two stages encode subject-conditioned
-bias information in genuinely incompatible internal representations, not merely
-weaker or attenuated copies of each other.** Report it with statistics that don't
-assume a bounded, interpolating scale:
-- Fraction of cases landing in `[low, high]` at all (33% / 8% above) — this number
-  *is* the finding, not a nuisance statistic.
-- The raw, unnormalized `cross_all` score plotted directly against `low`/`high`
-  reference lines, rather than a normalized ratio.
-- A dispersion statistic (std ≈ 8.5 on both directions above) rather than a mean or
-  median.
-- The direction asymmetry itself is worth a sentence: base→instruct lands in-range
-  4× more often than instruct→base, mild evidence that fine-tuning adds structure the
-  base model's later layers never learned to handle (harder to hand instruct's
-  activations to base than the reverse), not just rotates existing structure in place.
+transfers incompletely between training stages" (implies a measurable *degree*, which
+would mean values attenuated toward zero but still bounded in `[0,1]` — not what's
+observed). The defensible, and more interesting, claim: **forcing one training
+stage's subject-conditioned activations into the other produces effects with no
+consistent relationship to that model's own corrupted-to-clean scale — evidence that
+the two stages encode subject-conditioned bias information in genuinely incompatible
+internal representations, not merely weaker or attenuated copies of each other.**
+Report it with statistics that don't assume a bounded, interpolating scale:
+- Fraction of cases landing in `[low, high]` at all (33% / 8%) — this number *is* the
+  finding, not a nuisance statistic to explain away.
+- Raw, unnormalized `cross_all` plotted directly against `low`/`high` reference
+  lines, not a normalized ratio.
+- A dispersion statistic (std ≈ 8.5 both directions) rather than a mean or median.
+- The direction asymmetry is worth its own sentence: base→instruct lands in-range 4×
+  more often than the reverse — mild evidence fine-tuning *adds* structure the base
+  model's later layers never learned to handle, not just rotates existing structure.
 
 `scripts/table.py`'s Part 2 (W1/JSD distributional distance) is on firmer ground for
-a cross-model comparison than any NIE-based figure, because it compares raw pooled
+a cross-model comparison than any NIE-based figure — it compares raw pooled
 distributions directly and never assumes the `[low, high]` anchoring that breaks
 above.
 
 ---
 
-## 4. Deliberate design choices — settled, but worth knowing why when someone asks
+## 6. What changed this session, in order
+
+All on `main`, no separate branches.
+
+1. **`05c6f5f` — Added the signed chain to plotting.** `collect_scores()` and
+   `normalized_indirect_effect()` gained a `signed=` flag. Before this, NIE existed
+   in name only — computed from the abs chain, making it a pure rescaling of ALP.
+2. **`3d00194` → reverted in `3bed2ca` — ROME Fig. 3 "severing."** Explored, built,
+   and logic-verified (toy model, no GPU) a necessity-test extension to
+   `trace_with_patch`, then removed it: no driver or CLI ever used it. If wanted
+   later, the design and the specific bug it was built to avoid are written down in
+   `3d00194`'s commit message.
+3. **`634d94b` — `scripts/table.py`'s comparison table moved to signed NIE**, through
+   the same shared function as everywhere else.
+4. **`7aec69b`, `89ba02e` — two bug fixes**: a crash (not a graceful "n/a") on result
+   files without the signed chain, and a pre-existing, unrelated `IndexError` on
+   single-domain figure runs.
+5. **`b085ecd` — the pooling-noise-amplification fix** (§7). Added
+   `signed_gap_reliable()`.
+6. **`e373d1c` — finished the rollout.** Five remaining figures still computed "NIE"
+   from the abs chain under the same name as the now-independent signed NIE
+   elsewhere. Migrated all five; consolidated four duplicated loader functions into
+   one shared `_finalize_result_dict()` in the process (net **−16 lines**, not more).
+7. **`86d451b` — resolved a stale in-code TODO** about which model's embedding std to
+   use for noise scaling (answer: always the target's — already correct, comment
+   just still posed it as an open question).
+
+**Net effect on `bias_trace.py`: 65 lines *smaller*** than before this session — the
+only lasting change there is deleting dead code (`trace_with_repatch`: confirmed
+unused, and confirmed buggy — it shared one `RandomState` across two internal passes,
+so its two passes never drew the same noise for what was supposed to be one
+consistent corruption).
+
+---
+
+## 7. Deliberate design choices — settled, but worth knowing why when someone asks
 
 - **NIE pools raw signed values across cases before dividing once; it does not
-  normalize each case by its own gap and then average ("macro" averaging).** This
-  is a live tension with `BLUEPRINT.md §2`, which states the project's originally
-  intended convention as macro averaging, citing Zhang & Nanda (2024) and Sen Sharma
-  et al. (2024). The pooled approach was kept deliberately: a domain whose cases
-  split between stereotype- and anti-stereotype-preferring should show up as a small
-  net signal (a real finding — "this domain isn't uniformly stereotyped"), not be
-  aligned away by normalizing each case to its own direction first. The tradeoff is
-  the noise-amplification failure `signed_gap_reliable()` (§2.5) now guards against.
-  If a reviewer pushes on this, the honest answer is: it's a considered choice with a
-  known, guarded failure mode, not an oversight — but re-litigate it before finalizing
-  if the guard ends up suppressing a large fraction of domains once real data exists.
+  normalize each case by its own gap and then average ("macro" averaging).** Live
+  tension with `BLUEPRINT.md §2`, which states the project's originally intended
+  convention as macro averaging (citing Zhang & Nanda 2024, Sen Sharma et al. 2024).
+  Kept pooled deliberately: a domain split between stereotype- and
+  anti-stereotype-preferring cases should show up as a small net signal (a real
+  finding), not be aligned away by normalizing each case to its own direction first.
+  The tradeoff is the noise-amplification failure mode §6-item-5 guards against.
 - **`LOW_SIGNAL = 0.03`** is reused as the reliability threshold for both chains.
-  `BLUEPRINT.md` itself flags that this specific number has no citable, published
-  justification and should be sensitivity-checked before it appears in the paper as
-  more than a display heuristic.
+  `BLUEPRINT.md` itself flags this number has no citable, published justification and
+  should be sensitivity-checked before it appears in the paper as more than a display
+  heuristic.
 - **Gaussian-noise corruption only** (no symmetric-token-replacement cross-check).
   Matches the ROME/Meng et al. lineage; not revisited this session by explicit
   decision.
 
 ---
 
-## 5. Known, already-documented issues this session did not change
+## 8. Corner-case gallery — worked examples of where the numbers get weird
 
-Full detail in `review.md` and `UNEQUAL_LENGTH_PROBLEM.md` — not re-litigated here,
-just indexed so you know where to look:
-
-- **~11–14% of cases are causally unmeasurable by construction** (the BLANK token
-  precedes every subject-span token, so no subject-side intervention can reach it in
-  an autoregressive model) and are silently retained in every aggregate (`review.md`
-  S3).
-- **Different models see different case populations.** Cross-family case overlap for
-  gender is ~83% of the union; the drop mechanism (token-length mismatch) is
-  systematically biased toward dropping morphologically complex/rarer stereotype
-  terms, not random (`review.md` S4, `UNEQUAL_LENGTH_PROBLEM.md`). Harmless within a
-  base/instruct pair (same tokenizer); a real confound across model families.
-- **bf16 quantization on every instruct-model target** (every model here loads bf16
-  except the OLMo base checkpoints) may be on the same order of magnitude as the
-  effect sizes being measured. Independently sanity-checked this session via a
-  CPU-only simulation of bf16 rounding on realistic logit magnitudes (perturbation to
-  `log_softmax` output: median 0.006–0.12, max up to 0.34, vs. a median effect gap of
-  0.046) — plausible and credible, not confirmed on the live model (`review.md` B1;
-  needs GPU access to close out properly).
+| Case | What happens | Real or illustrative | Why |
+|---|---|---|---|
+| **Near-zero gap** | §2's "father/emotional/tough" case: `high=0.7248`, `low=0.7226`, gap=0.0022 | **Real** (n=1 of 681, but 38.6% of the domain has gap ≤ 0 — see §5) | Corruption sometimes barely moves, or slightly reverses, the sentence-level preference. Not a bug — the un-run blank-only check (§5) is the way to find out if it's a metric artifact. |
+| **Cross-model wild value** | §3's same case, cross-patched: `fraction = -0.31` on a *healthy* 0.7361 gap; elsewhere in the same probe, fractions of `+23.48` and `-27.9` | **Real** (`verification/cross_model_scale_probe_olmo.json`) | The restored value comes from a foreign model's weights — nothing anchors it to `[low, high]`. See §3/§4. |
+| **Pooled-NIE noise amplification** | 200 synthetic cases, split 50/50 stereo/anti-preferring, *every* case truly recovers 90% of its own gap at layer 5 and nothing elsewhere. Pooled NIE reports **off-peak values up to 0.36** (comparable to the true 0.86 peak) at layers with zero true effect; macro-per-case averaging on the identical data stays under 0.01 off-peak everywhere. | **Illustrative / synthetic**, built to isolate this one mechanism cleanly (scratch script, not committed) | Pooling `mean_high_signed`/`mean_low_signed` across a split domain can produce a near-zero *denominator* even though no individual case is degenerate. Dividing noise by a near-zero number produces large, structured-looking, spurious numbers. |
+| **The fix in action** | Same synthetic construction: pooled gap `0.0044` (this split) → `signed_gap_reliable()` returns `False` → NIE reported as `n/a`. A milder split (60/40, pooled gap `0.058`) → guard passes, off-peak noise stays at `0.013`. | **Illustrative / synthetic**, `plot_utils.signed_gap_reliable()` | This is exactly the guard added in `b085ecd` (§6 item 5) — reuses `LOW_SIGNAL=0.03` as the cutoff. |
+| **Unmeasurable by construction** | A case where the BLANK token appears *before* every subject-span token in the sentence. | **Documented, not re-derived this session** — `review.md` S3 | In an autoregressive model, no intervention on a later subject token can change a prediction made *before* it in the sequence — corruption and restoration are both no-ops for that BLANK's score. ~11-14% of cases, silently retained in every aggregate. |
+| **Tokenization-length skip** | Fill words like "very\`quiet" (stray backtick) or a stereotype/anti-stereotype pair that tokenizes to different lengths get dropped before scoring (`bias_trace.py:239-240`). | **Documented, not re-derived this session** — `review.md`, `UNEQUAL_LENGTH_PROBLEM.md` | The whole-sentence metric needs the anti/stereo prefixes to align token-for-token; unequal lengths break that alignment. Drop rate differs by tokenizer family (worse for byte-BPE than SentencePiece), a real confound for cross-family comparisons. |
 
 ---
 
-## 6. One thing to check before trusting *any* number above against a fresh run
+## 9. One thing to check before trusting *any* number above against a fresh run
 
 **Every currently-existing result file (local checkout, shared results root,
 `results.zip`, `main.zip`) predates this session's code** — legacy format, no
 `score_metric`/`scores_signed`/provenance fields, fixed `window=10` regardless of
-model depth. None of §1–§4's guards or the signed chain have ever run against a real
-model. The cross-model anchoring problem in §3 is the one exception — it was measured
-directly from a small, real, already-executed probe
+model depth. §2's worked example uses one of these legacy files for its *abs-chain*
+numbers (which are unaffected by anything in this session), but none of §1/§6/§7's
+signed-chain code has ever run against a real model. §3/§8's cross-model finding is
+the one exception — it's live evidence from an actual small probe run this session
 (`verification/cross_model_scale_probe_olmo.json`), not from the legacy result
-corpus, so that specific finding *is* live evidence. Everything else describing "what
-the current code does" is verified against the code and synthetic data, not against a
-full regenerated result set. Regenerate before finalizing any headline number.
+corpus. Regenerate before finalizing any headline number that depends on the signed
+chain.
 
 ---
 
-## 7. Quick map: concept → code
+## 10. Quick map: concept → code
 
 | Concept | Where |
 |---|---|
 | ALP / signed chain definitions | `experiments/bias_trace.py::causal_difference`, `calculate_hidden_flow` |
 | `collect_scores(signed=...)` | `plot_utils.py` |
 | `normalized_indirect_effect(..., signed=...)` | `plot_utils.py` |
-| `signed_gap_reliable()` (the §4 guard) | `plot_utils.py`, just below `LOW_SIGNAL` |
+| `signed_gap_reliable()` (§7's guard) | `plot_utils.py`, just below `LOW_SIGNAL` |
 | Shared within-model/cross-patch result-dict builder | `fig.py::_finalize_result_dict` |
 | Within-model report (NIE table, trajectory) | `fig.py::save_stats_and_report`, `save_bias_trajectory` |
-| Cross-model probe (source of §3's numbers) | `verification/cross_model_scale_probe.py` |
+| Cross-model probe (source of §3/§8's numbers) | `verification/cross_model_scale_probe.py` |
 | Comparison table for the paper | `scripts/table.py` |
