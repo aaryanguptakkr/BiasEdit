@@ -186,6 +186,9 @@ def save_composite_all(states_data, words_data, model_name, ckpt_label, out_dir)
         return
     fig, axes = plt.subplots(2, len(domains),
                              figsize=(FIG_BAR_W_PER_COL * len(domains), FIG_ROW_H * 2))
+    if len(domains) == 1:
+        axes = axes[:, np.newaxis]  # matplotlib squeezes a size-1 axis away by default;
+        # same fix save_cross_patch_direction's identical 2xN grid already uses below.
     fig.suptitle(f'All bias domains — {model_name}  [{ckpt_label}]',
                  fontsize=FS_SUPTITLE, fontweight='bold')
     for col, domain in enumerate(domains):
