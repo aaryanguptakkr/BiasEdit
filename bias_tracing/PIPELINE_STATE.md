@@ -147,25 +147,45 @@ whole probe).
 
 ## 4. Within-model vs. cross-model, side by side
 
-```mermaid
-flowchart LR
-    subgraph W["Within-model (source = target)"]
-        direction TB
-        W1["Clean activation comes from\nthe SAME model's own forward pass"] --> W2["It IS a point on this model's\nown corrupted-to-clean journey"]
-        W2 --> W3["NIE is a meaningful\n0..1-ish interpolation\n(usually)"]
-    end
-    subgraph X["Cross-model (source = other training stage)"]
-        direction TB
-        X1["Clean activation comes from\na DIFFERENT model's weights"] --> X2["Target's downstream layers were\nnever trained to interpret this vector"]
-        X2 --> X3["Restored score can land\nanywhere -- below low,\nabove high, or in between"]
-    end
+**The coordinate (which layer, which token) is exactly maintained in both cases —
+this is not what breaks.** `patch_rep`'s actual patching line
+(`experiments/bias_trace.py:494`) is:
+
+```python
+h[1:, t] = source_clean_h[0, t]
 ```
 
-Same architecture (`validate_model_pair`'s checks: hidden size, layer count,
-tokenizer) guarantees the *shapes* line up — the patch runs without a tensor error.
-It says nothing about whether the two models' internal representations *mean* the
-same thing at that coordinate. §3's probe is base ↔ instruct of the *same* model
-family — the closest two checkpoints can be — and the mismatch still shows up.
+The same `layer` string (e.g. `"model.layers.5"`) and the same integer `t` (a token
+position) are used to both *read* the clean value out of the source and *write* it
+into the target — nothing shifts or re-indexes. That's only valid because
+`validate_model_pair()` (run once, before any patching starts) already enforced: same
+layer count and hidden size (so `"model.layers.5"` is the same structural position in
+both models), and identical tokenizer plus identical token ids on a probe sentence
+(so token index `t` is the same word in both models' sequences). Given that, "same
+address" is guaranteed by construction, in both the within-model and cross-model case
+alike.
+
+**What differs is only what's *stored* at that identical address:**
+
+```mermaid
+flowchart TD
+    C0["Same coordinate, guaranteed by validate_model_pair():\nlayer L (e.g. 'model.layers.5'), token t (e.g. position 2)"]
+    C0 --> C1["patch_rep: h[1:, t] = source_clean_h[0, t]\n(same L, same t, for both the read and the write)"]
+    C1 --> W1["WITHIN-MODEL: source = target\nvalue at (L, t) is THIS model's\nown clean value at (L, t)"]
+    C1 --> X1["CROSS-MODEL: source = other stage\nvalue at (L, t) is the OTHER model's\nvalue -- same address, different content"]
+    W1 --> W2["Target's downstream layers were TRAINED\non exactly this vector at (L, t)\n-> restored value sits ON the model's\nown corrupted-to-clean path"]
+    X1 --> X2["Target's downstream layers were NEVER\ntrained on this vector at (L, t)\n-> restored value is off that path entirely"]
+    W2 --> W3["NIE is a meaningful\n0..1-ish interpolation\n(usually)"]
+    X2 --> X3["Restored score can land\nanywhere -- below low,\nabove high, or in between"]
+```
+
+Same architecture (`validate_model_pair`'s checks) guarantees the *address* lines up
+— the patch runs without a tensor error, at exactly the right layer and token. It
+says nothing about whether the two models' internal representations *mean* the same
+thing once you're standing at that address. §3's probe is base ↔ instruct of the
+*same* model family — the closest two checkpoints can be, sharing the same
+architecture and tokenizer this whole guarantee rests on — and the mismatch still
+shows up.
 
 ---
 
