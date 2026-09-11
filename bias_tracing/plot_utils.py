@@ -217,6 +217,31 @@ PAPER_DOMAINS = ['gender', 'race', 'profession']  # domains used in paper figure
 # computation; see normalized_indirect_effect() for the degenerate-gap policy.
 LOW_SIGNAL = 0.03
 
+
+def signed_gap_reliable(effect_gap_signed, low_signal=LOW_SIGNAL):
+    """True if a pooled SIGNED effect_gap is large enough for its NIE to be trustworthy.
+
+    collect_scores(signed=True) pools raw signed values across cases with no per-case sign
+    alignment (see its docstring): a domain split between stereotype- and anti-stereotype-
+    preferring cases pools to a small denominator even when every individual case's own
+    recovery is clean and unambiguous. Dividing per-layer noise by that near-vanishing
+    denominator doesn't just make the ratio a little noisier -- it manufactures large,
+    structured-looking "effects" at layers with no true effect at all. Confirmed on
+    synthetic 200-case domains with a real, uniform effect at one layer only: a pooled gap
+    an order of magnitude below LOW_SIGNAL produced off-peak |NIE| > 30; once the pooled
+    gap cleared LOW_SIGNAL, off-peak |NIE| stayed under 0.02.
+
+    Reuses the abs chain's own LOW_SIGNAL scale (rather than a separate signed-specific
+    number) for two reasons: it was already calibrated against exactly this failure mode
+    for the abs chain (see LOW_SIGNAL's own comment above), and reusing it keeps the two
+    chains' "is this gap big enough to trust" cutoffs directly comparable. This is a
+    display-time reliability gate, not a mathematical validity gate -- normalized_indirect_
+    effect's own degenerate check (effect_gap ~= 0) stays separate and much stricter, since
+    that one guards against a literal division error, not a signal-quality judgment call.
+    """
+    return effect_gap_signed is not None and abs(effect_gap_signed) >= low_signal
+
+
 # These name what the pipeline actually computes. The three bars are, in order,
 # res['bias_mean'], res['mlp_mean'], res['attn_mean'] — a single restored hidden state,
 # then a restored WINDOW of MLP outputs, then a restored window of attention outputs

@@ -88,7 +88,7 @@ from plot_utils import (
     local_cases_dir, zip_cases_prefix, partition_names, subsample_aligned,
     load_npz_local, load_npz_zip,
     SCORE_METRIC, validate_score_files, collect_scores,
-    _draw_bars, _savepdf, normalized_indirect_effect,
+    _draw_bars, _savepdf, normalized_indirect_effect, signed_gap_reliable,
 )
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -328,7 +328,11 @@ def save_stats_and_report(model_name, all_ckpt_stats, out_dir):
             nl   = s['num_layers']
             mid  = nl // 2
             gap_s, low_s = s.get('effect_gap_signed'), s.get('mean_low_signed')
-            if gap_s is not None and low_s is not None:
+            # signed_gap_reliable, not just "is not None": a pooled signed gap can be
+            # nonzero but still small enough to amplify per-layer noise into large,
+            # spurious-looking NIE values (see its docstring) -- reject those too, not
+            # just the literal-zero denominator normalized_indirect_effect itself guards.
+            if low_s is not None and signed_gap_reliable(gap_s):
                 nie_l0   = normalized_indirect_effect(s['states_score_signed'][0],   low_s, gap_s, degenerate='zero', signed=True)
                 nie_lmid = normalized_indirect_effect(s['states_score_signed'][mid], low_s, gap_s, degenerate='zero', signed=True)
                 nie_last = normalized_indirect_effect(s['states_score_signed'][-1],  low_s, gap_s, degenerate='zero', signed=True)
@@ -373,7 +377,7 @@ def save_stats_and_report(model_name, all_ckpt_stats, out_dir):
             else:
                 flag = '  ⚠ low-signal' if s['effect_gap'] < LOW_SIGNAL else ''
                 gap_s, low_s = s.get('effect_gap_signed'), s.get('mean_low_signed')
-                if gap_s is not None and low_s is not None:
+                if low_s is not None and signed_gap_reliable(gap_s):
                     nie_vals = normalized_indirect_effect(s['states_score_signed'], low_s, gap_s, degenerate='zero', signed=True)
                     vals = ' | '.join(f'{v:+.2f}' for v in nie_vals)
                 else:
@@ -519,7 +523,7 @@ def save_bias_trajectory(base_stats, instruct_stats, out_dir):
             raw_l0 = s['states_score'][0]
             gap_s, low_s = s.get('effect_gap_signed'), s.get('mean_low_signed')
             frac_l0 = (normalized_indirect_effect(s['states_score_signed'][0], low_s, gap_s, degenerate='nan', signed=True)
-                       if gap_s is not None and low_s is not None else float('nan'))
+                       if low_s is not None and signed_gap_reliable(gap_s) else float('nan'))
             base_pts.append((e['label'], gap, frac_l0, raw_l0, gap < LOW_SIGNAL))
 
         for e in instruct_stats:
@@ -530,7 +534,7 @@ def save_bias_trajectory(base_stats, instruct_stats, out_dir):
             raw_l0 = s['states_score'][0]
             gap_s, low_s = s.get('effect_gap_signed'), s.get('mean_low_signed')
             frac_l0 = (normalized_indirect_effect(s['states_score_signed'][0], low_s, gap_s, degenerate='nan', signed=True)
-                       if gap_s is not None and low_s is not None else float('nan'))
+                       if low_s is not None and signed_gap_reliable(gap_s) else float('nan'))
             instruct_pts.append((e['label'], gap, frac_l0, raw_l0, gap < LOW_SIGNAL))
 
         if not base_pts and not instruct_pts:

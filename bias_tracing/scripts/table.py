@@ -70,7 +70,7 @@ import zipfile
 from plot_utils import (
     MODEL_CONFIGS, local_cases_dir, CROSS_PATCH_BASE, CROSS_PATCH_CONFIGS,
     collect_scores, load_npz_local, load_npz_zip, partition_names,
-    zip_cases_prefix, ZIP_PATH, MAIN_ZIP, normalized_indirect_effect,
+    zip_cases_prefix, ZIP_PATH, MAIN_ZIP, normalized_indirect_effect, signed_gap_reliable,
 )
 
 DOMAINS = ['gender', 'profession', 'race']
@@ -150,6 +150,15 @@ for domain in DOMAINS:
     if have_signed:
         gap_b_s = mh_b_s - ml_b_s
         gap_i_s = mh_i_s - ml_i_s
+        # signed_gap_reliable, not just "have signed data": collect_scores(signed=True)
+        # pools raw (non-sign-aligned) values, so a domain split between stereotype- and
+        # anti-stereotype-preferring cases can pool to a tiny gap even when every case's
+        # own recovery is clean -- dividing by that near-vanishing denominator manufactures
+        # large, spurious per-position NIE values rather than just noisier ones. Rejecting
+        # both sides here, not just checking the result is finite, is required: a small
+        # nonzero gap still passes normalized_indirect_effect's own (much stricter)
+        # degenerate check and returns a finite but wrong number.
+        have_signed = signed_gap_reliable(gap_b_s) and signed_gap_reliable(gap_i_s)
 
     if domain == 'gender':
         print("\n=== Part 1 RAW gender values (before NIE) — abs log prob diff, micro-avg per layer ===")
@@ -202,7 +211,10 @@ for domain in DOMAINS:
         ])
         nie_ok = bool(np.all(np.isfinite(nie_b)) and np.all(np.isfinite(nie_i)))
     else:
-        print('NIE               : n/a -- these result files predate scores_signed')
+        reason = ('these result files predate scores_signed' if subj_b_s is None or subj_i_s is None
+                  else 'pooled signed effect_gap is too small to trust (base or instruct) -- '
+                       'likely a domain split between stereotype- and anti-stereotype-preferring cases')
+        print(f'NIE               : n/a -- {reason}')
         nie_ok = False
 
     results[domain] = {
