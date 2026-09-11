@@ -2508,11 +2508,17 @@ for model_name in (models_to_run if RUN_BARS or RUN_DELTA or RUN_COMPARE else []
                 'top3_mlp':          _top_layers(mlp_mean),
                 'top3_attn':         _top_layers(attn_mean),
                 # signed chain -- NIE only. None when scores_signed isn't in the result files.
-                'mean_high_signed':  round(mean_high_s, 6) if mean_high_s is not None else None,
-                'mean_low_signed':   round(mean_low_s,  6) if mean_low_s  is not None else None,
+                # Gated on bias_mean_s (the array collect_scores actually sets to None on
+                # failure) rather than the scalar mean_high_s/mean_low_s: collect_scores's
+                # failure tuple is (None, None, None, 0, 0.0, 0.0) -- the scalars come back
+                # as 0.0, not None, so checking "mean_high_s is not None" alone would store
+                # effect_gap_signed=0.0 (truthy for a None-check) while states_score_signed
+                # stayed None, and every reader below would then pass its own is-not-None
+                # guard and crash indexing into None.
+                'mean_high_signed':  round(mean_high_s, 6) if bias_mean_s is not None else None,
+                'mean_low_signed':   round(mean_low_s,  6) if bias_mean_s is not None else None,
                 'effect_gap_signed': (round(mean_high_s - mean_low_s, 6)
-                                      if mean_high_s is not None and mean_low_s is not None
-                                      else None),
+                                      if bias_mean_s is not None else None),
                 'states_score_signed': bias_mean_s.tolist() if bias_mean_s is not None else None,
                 'attn_score_signed':   attn_mean_s.tolist() if attn_mean_s is not None else None,
                 'mlp_score_signed':    mlp_mean_s.tolist()  if mlp_mean_s  is not None else None,
