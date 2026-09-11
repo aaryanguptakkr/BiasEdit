@@ -193,8 +193,11 @@ def main():
     # Bias Dataset
     knowns = StereoSetDataset(mt_target.tokenizer, args.bias_file, args.model_target)
 
-    # TODO: check
-    # when patching mt1 clean -> mt2 corrupted do you use noise from mt2?
+    # Resolved: yes, always the target's own embedding std -- `mt_target` below, never
+    # the source. The target is the model whose embeddings actually get corrupted
+    # (trace_with_patch's noise only ever touches model_target), so this is the only
+    # scale that makes sense regardless of which model is acting as source in a given
+    # direction.
     noise_level = args.noise_level
     uniform_noise = False
     if isinstance(noise_level, str):
