@@ -263,7 +263,11 @@ def save_stats_and_report(model_name, all_ckpt_stats, out_dir):
         f'For each sentence pair (stereotyped vs. anti-stereotyped), the subject tokens are corrupted',
         f'with Gaussian noise. Then, one hidden state at a time is restored to its clean value.',
         f'The **indirect effect** at (token i, layer j) = how much the prediction recovers when',
-        f'only that one state is restored. Reported here as NIE (normalized by the clean–corrupted gap).',
+        f'only that one state is restored. Reported here as NIE (normalized by the clean–corrupted gap),',
+        f'computed on the **signed** stereo-minus-anti score, not its absolute value -- so a layer that',
+        f'pushes the model toward the anti-stereotype is distinguishable from one that restores the',
+        f'stereotype, rather than both scoring as equally "recovered". "n/a" means this result predates',
+        f'the signed score and only the absolute-value chain is available.',
         f'',
         f'Three restore conditions per sentence pair:',
         f'- **Full restore** (single state): all components (MLP + Attn) restored at that layer',
@@ -299,11 +303,9 @@ def save_stats_and_report(model_name, all_ckpt_stats, out_dir):
         f'| **N cases** | Sentence pairs processed |',
         f'| **High score** | Mean clean-run absolute whole-sentence log-prob gap |',
         f'| **Low score** | Mean corrupted-run absolute whole-sentence log-prob gap |',
-        f'| **Effect gap** | High − Low — reduction in absolute separation after corruption; < 0.03 = low-signal |',
+        f'| **Effect gap** | High − Low, absolute chain — reduction in separation after corruption; < 0.03 = low-signal |',
         f'| **Peak All/MLP/Attn** | Layer with highest raw patched score under each restore condition |',
-        f'| **NIE L0** | Normalized indirect effect at the embedding layer |',
-        f'| **NIE L-mid** | NIE at the middle layer |',
-        f'| **NIE L-last** | NIE at the final layer |',
+        f'| **NIE L0/L-mid/L-last** | Normalized indirect effect (signed chain) at layer 0 / middle / final layer |',
         f'',
         f'---',
         f'',
@@ -318,18 +320,22 @@ def save_stats_and_report(model_name, all_ckpt_stats, out_dir):
             if s is None:
                 lines.append(f'| {e["label"]} | {domain} | — | — | — | — | — | — | — | — |')
                 continue
-            gap  = s['effect_gap']
-            low  = s['mean_low']
+            gap  = s['effect_gap']          # abs chain -- low-signal flag stays on magnitude
             flag = ' ⚠' if gap < LOW_SIGNAL else ''
             nl   = s['num_layers']
             mid  = nl // 2
-            nie_l0   = normalized_indirect_effect(s['states_score'][0],   low, gap, degenerate='zero')
-            nie_lmid = normalized_indirect_effect(s['states_score'][mid], low, gap, degenerate='zero')
-            nie_last = normalized_indirect_effect(s['states_score'][-1],  low, gap, degenerate='zero')
+            gap_s, low_s = s.get('effect_gap_signed'), s.get('mean_low_signed')
+            if gap_s is not None and low_s is not None:
+                nie_l0   = normalized_indirect_effect(s['states_score_signed'][0],   low_s, gap_s, degenerate='zero', signed=True)
+                nie_lmid = normalized_indirect_effect(s['states_score_signed'][mid], low_s, gap_s, degenerate='zero', signed=True)
+                nie_last = normalized_indirect_effect(s['states_score_signed'][-1],  low_s, gap_s, degenerate='zero', signed=True)
+                nie_cols = f"{nie_l0:+.2f} | {nie_lmid:+.2f} | {nie_last:+.2f}"
+            else:
+                nie_cols = "n/a | n/a | n/a"
             lines.append(
                 f"| {e['label']} | {domain}{flag} | {s['n_cases']} | {gap:.4f} "
                 f"| {s['peak_layer_states']} | {s['peak_layer_mlp']} | {s['peak_layer_attn']} "
-                f"| {nie_l0:+.2f} | {nie_lmid:+.2f} | {nie_last:+.2f} |"
+                f"| {nie_cols} |"
             )
 
     lines += [
@@ -338,12 +344,16 @@ def save_stats_and_report(model_name, all_ckpt_stats, out_dir):
         f'',
         f'## Normalized Indirect Effect (NIE) by layer — States (full restore)',
         f'',
-        f'NIE = (restoration_score - low_score) / (high_score - low_score).',
+        f'NIE = (restoration_score - low_score) / (high_score - low_score), all three on the',
+        f'**signed** chain (stereo-minus-anti, not its absolute value).',
         f'',
-        f'- **NIE > 0**: restoring this (subject token, layer) recovers some of the clean prediction.',
-        f'- **NIE = 1**: full recovery to clean-run probability.',
-        f'- **NIE < 0**: restoring this position makes prediction *worse* than the corrupted baseline — '
-        f'the model\'s internal state has become inconsistent from partially restoring only one position.',
+        f'- **NIE > 0**: restoring this (subject token, layer) recovers some of the clean model\'s own',
+        f'  preference (whichever direction that preference happened to be).',
+        f'- **NIE = 1**: full recovery of that preference.',
+        f'- **NIE < 0**: restoring this position pushes the prediction *away* from the clean model\'s',
+        f'  own preference — either the position pulls toward the opposite (stereo vs. anti) direction,',
+        f'  or the model\'s internal state has become inconsistent from partially restoring only one',
+        f'  position. The two aren\'t distinguished by this number alone.',
         f'',
         f'⚠ Rows marked `[low-signal]` have gap < 0.03 — too small for reliable NIE estimates.',
         f'',
@@ -358,11 +368,13 @@ def save_stats_and_report(model_name, all_ckpt_stats, out_dir):
             if s is None:
                 lines.append(f'| {domain} | ' + ' | '.join(['—'] * nl) + ' |')
             else:
-                gap  = s['effect_gap']
-                low  = s['mean_low']
-                flag = '  ⚠ low-signal' if gap < LOW_SIGNAL else ''
-                nie_vals = normalized_indirect_effect(s['states_score'], low, gap, degenerate='zero')
-                vals = ' | '.join(f'{v:+.2f}' for v in nie_vals)
+                flag = '  ⚠ low-signal' if s['effect_gap'] < LOW_SIGNAL else ''
+                gap_s, low_s = s.get('effect_gap_signed'), s.get('mean_low_signed')
+                if gap_s is not None and low_s is not None:
+                    nie_vals = normalized_indirect_effect(s['states_score_signed'], low_s, gap_s, degenerate='zero', signed=True)
+                    vals = ' | '.join(f'{v:+.2f}' for v in nie_vals)
+                else:
+                    vals = ' | '.join(['n/a'] * nl)
                 lines.append(f'| {domain}{flag} | {vals} |')
         lines.append('')
 
@@ -485,7 +497,10 @@ def save_bias_trajectory(base_stats, instruct_stats, out_dir):
     Three panels:
       1. Effect gap (high − low) — overall bias strength, raw abs log prob diff units.
       2. Embedding layer contribution — fraction of effect gap recovered at L0
-         = (states_score[0] − mean_low) / effect_gap. Scale-invariant across checkpoints.
+         = (states_score_signed[0] − mean_low_signed) / effect_gap_signed. Signed chain, so a
+         checkpoint whose L0 restoration pushes toward the anti-stereotype shows as negative
+         rather than being folded in as "recovered". Scale-invariant across checkpoints.
+         NaN when the result predates scores_signed.
       3. Raw abs. log prob diff at L0 (states_score[0]) — absolute causal signal at first transformer layer.
     Base checkpoints appear on the left; instruct fine-tuning on the right;
     a vertical dashed line marks the phase boundary.
@@ -499,7 +514,9 @@ def save_bias_trajectory(base_stats, instruct_stats, out_dir):
                 continue
             gap    = s['effect_gap']
             raw_l0 = s['states_score'][0]
-            frac_l0 = normalized_indirect_effect(raw_l0, s['mean_low'], gap, degenerate='nan')
+            gap_s, low_s = s.get('effect_gap_signed'), s.get('mean_low_signed')
+            frac_l0 = (normalized_indirect_effect(s['states_score_signed'][0], low_s, gap_s, degenerate='nan', signed=True)
+                       if gap_s is not None and low_s is not None else float('nan'))
             base_pts.append((e['label'], gap, frac_l0, raw_l0, gap < LOW_SIGNAL))
 
         for e in instruct_stats:
@@ -508,7 +525,9 @@ def save_bias_trajectory(base_stats, instruct_stats, out_dir):
                 continue
             gap    = s['effect_gap']
             raw_l0 = s['states_score'][0]
-            frac_l0 = normalized_indirect_effect(raw_l0, s['mean_low'], gap, degenerate='nan')
+            gap_s, low_s = s.get('effect_gap_signed'), s.get('mean_low_signed')
+            frac_l0 = (normalized_indirect_effect(s['states_score_signed'][0], low_s, gap_s, degenerate='nan', signed=True)
+                       if gap_s is not None and low_s is not None else float('nan'))
             instruct_pts.append((e['label'], gap, frac_l0, raw_l0, gap < LOW_SIGNAL))
 
         if not base_pts and not instruct_pts:
@@ -539,9 +558,9 @@ def save_bias_trajectory(base_stats, instruct_stats, out_dir):
              'Effect gap — how much corrupting subject tokens reduces bias-consistent probability\n'
              'Larger = model relies more on subject identity for this domain'),
             (ax_frac, frac_l0s,
-             'NIE at L0',
-             'NIE at L0 — normalized indirect effect at the first transformer layer\n'
-             '= (Patched − Corrupted) / (Clean − Corrupted)'),
+             'NIE at L0 (signed)',
+             'NIE at L0 — normalized indirect effect at the first transformer layer, signed chain\n'
+             '= (Patched − Corrupted) / (Clean − Corrupted), stereo-minus-anti (not abs)'),
             (ax_raw, raw_l0s,
              'Abs. log prob diff at L0\n(stereo − anti)',
              'Raw causal signal at the first transformer layer — absolute scale\n'
@@ -2439,6 +2458,14 @@ for model_name in (models_to_run if RUN_BARS or RUN_DELTA or RUN_COMPARE else []
             pre_blank_mean = pre_blank_mean if pre_blank_mean is not None else zero
             blank_mean     = blank_mean     if blank_mean     is not None else zero
 
+            # Signed chain, for NIE only (ALP above stays on the abs chain). None when the
+            # result files predate scores_signed -- report.md/stats.json fall back to "n/a"
+            # for NIE rather than silently mixing signed and abs numbers.
+            bias_mean_s, _, _, _, mean_high_s, mean_low_s = \
+                collect_scores(single_items, loader, signed=True)
+            attn_mean_s, _, _, _, _, _ = collect_scores(attn_items, loader, signed=True)
+            mlp_mean_s,  _, _, _, _, _ = collect_scores(mlp_items,  loader, signed=True)
+
             # ── per-checkpoint individual PDFs ─────────────────────────────
             if RUN_BARS:
                 save_individual(
@@ -2465,6 +2492,7 @@ for model_name in (models_to_run if RUN_BARS or RUN_DELTA or RUN_COMPARE else []
             ckpt_stats['domains'][domain] = {
                 'n_cases':           n_cases,
                 'num_layers':        int(num_layer),
+                # abs chain -- ALP bars, peak-layer bookkeeping
                 'mean_high':         round(mean_high, 6),
                 'mean_low':          round(mean_low,  6),
                 'effect_gap':        round(mean_high - mean_low, 6),
@@ -2479,6 +2507,15 @@ for model_name in (models_to_run if RUN_BARS or RUN_DELTA or RUN_COMPARE else []
                 'top3_states':       _top_layers(bias_mean),
                 'top3_mlp':          _top_layers(mlp_mean),
                 'top3_attn':         _top_layers(attn_mean),
+                # signed chain -- NIE only. None when scores_signed isn't in the result files.
+                'mean_high_signed':  round(mean_high_s, 6) if mean_high_s is not None else None,
+                'mean_low_signed':   round(mean_low_s,  6) if mean_low_s  is not None else None,
+                'effect_gap_signed': (round(mean_high_s - mean_low_s, 6)
+                                      if mean_high_s is not None and mean_low_s is not None
+                                      else None),
+                'states_score_signed': bias_mean_s.tolist() if bias_mean_s is not None else None,
+                'attn_score_signed':   attn_mean_s.tolist() if attn_mean_s is not None else None,
+                'mlp_score_signed':    mlp_mean_s.tolist()  if mlp_mean_s  is not None else None,
             }
 
         # ── composite per checkpoint ────────────────────────────────────────

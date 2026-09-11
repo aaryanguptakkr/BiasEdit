@@ -249,7 +249,7 @@ Y_LABEL_NIE  = 'NIE (normalized indirect effect)'
 
 # ── normalized indirect effect ────────────────────────────────────────────────
 
-def normalized_indirect_effect(values, mean_low, effect_gap, degenerate='skip'):
+def normalized_indirect_effect(values, mean_low, effect_gap, degenerate='skip', signed=False):
     """Normalized Indirect Effect — the single definition used by every plot.
 
         NIE = (restoration_score − low_score) / (high_score − low_score)
@@ -259,9 +259,19 @@ def normalized_indirect_effect(values, mean_low, effect_gap, degenerate='skip'):
     et al. (COLM 2024) Eq. 7 and Zhang & Nanda (ICLR 2024); tracing protocol from
     Meng et al. (2022).
 
-    NIE is undefined when effect_gap <= 0 — the denominator vanishes, or goes
-    negative (corruption *raised* the score), which silently inverts the scale.
-    Callers pick that behaviour explicitly rather than inheriting a default:
+    signed=False (default, ABS chain): NIE is undefined when effect_gap <= 0 —
+    the denominator vanishes, or goes negative, which for non-negative abs scores
+    only happens when corruption paradoxically *raised* the score, and dividing
+    by that would silently invert the scale.
+
+    signed=True (SIGNED chain): effect_gap CAN legitimately be negative — a
+    domain whose clean model nets out preferring the anti-stereotype has
+    high_score < 0, and a perfectly healthy result then has effect_gap < 0 too
+    (both high and low negative, division still gives the right-signed answer).
+    So here only a *vanishing* gap (high ~= low, no separation to normalize by,
+    in either direction) is degenerate — checked on the magnitude, not the sign.
+
+    Callers pick the degenerate-case fill explicitly rather than inheriting a default:
 
         'skip' → None                    caller drops the series
         'zero' → 0.0 / zeros(shape)      renders as "no effect"
@@ -273,7 +283,8 @@ def normalized_indirect_effect(values, mean_low, effect_gap, degenerate='skip'):
     float64 here would shift every plotted value by ~1e-7.
     """
     scalar = np.ndim(values) == 0
-    if effect_gap > 0:
+    ok = abs(effect_gap) > 1e-8 if signed else effect_gap > 0
+    if ok:
         out = (np.asarray(values) - mean_low) / effect_gap
         return float(out) if scalar else out
     if degenerate == 'skip':
@@ -435,25 +446,38 @@ def validate_score_files(file_lists, loader, expected=None):
     return reference
 
 
-def collect_scores(file_list, loader):
+def collect_scores(file_list, loader, signed=False):
     """
     Aggregate indirect-effect scores across sentence pairs.
+
+    signed=False (default): the abs whole-sentence metric -- ALP, "where does bias exist".
+    signed=True: the signed whole-sentence metric -- feed this into normalized_indirect_effect
+      for NIE, "how much does restoring/corrupting a state move the model's own preference".
+      Pooling is over raw signed values, no per-case sign-alignment: a domain whose cases are
+      genuinely split between stereotype- and anti-stereotype-preferring will show that as a
+      small pooled mean_high/mean_low, which is a real finding ("this domain isn't uniformly
+      stereotyped"), not an error to normalize away. Missing signed fields (a legacy result
+      file) are skipped like any other read failure, so a signed collection can legitimately
+      return fewer/zero usable files than the abs collection over the same file_list.
 
     Returns:
       bias_mean      (n_layers,)  mean score at subject token positions
       pre_blank_mean (n_layers,)  mean score at token before prediction target
       blank_mean     (n_layers,)  mean score at prediction target positions
       n_cases        int
-      mean_high      float  mean clean-run abs log prob diff
-      mean_low       float  mean corrupted-run abs log prob diff
+      mean_high      float  mean clean-run log prob diff (abs, or signed if signed=True)
+      mean_low       float  mean corrupted-run log prob diff (abs, or signed if signed=True)
     Returns (None, None, None, 0, 0.0, 0.0) on failure.
     """
+    score_key = 'scores_signed' if signed else 'scores'
+    high_key  = 'high_score_signed' if signed else 'high_score'
+    low_key   = 'low_score_signed' if signed else 'low_score'
     bias_word, pre_blank, blank = [], [], []
     highs, lows = [], []
     for item in tqdm(file_list, leave=False):
         try:
             d = loader(item)
-            scores = d['scores']
+            scores = d[score_key]
             for b, e in d['corrupt_range_anti']:
                 bias_word.append(scores[b:e])
             idx0 = int(d['blank_idxs_anti'][0])
@@ -461,8 +485,8 @@ def collect_scores(file_list, loader):
             if idx0 > 0:
                 pre_blank.append(scores[idx0 - 1][np.newaxis, :])
             blank.append(scores[idx0:idx1])
-            highs.append(float(d['high_score']))
-            lows.append(float(d['low_score']))
+            highs.append(float(d[high_key]))
+            lows.append(float(d[low_key]))
         except Exception as exc:
             print(f'    [collect_scores] Skipping {item}: {exc}')
             continue
