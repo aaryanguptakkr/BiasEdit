@@ -397,6 +397,8 @@ def trace_with_patch(
     replace=False,  # True to replace with instead of add noise
     trace_layers=None,  # List of traced outputs to return
     source_cache=None,  # Pre-traced clean source activations (see trace_source_states)
+    states_to_sever=None,  # A list of (token index, layername) triples to force back to corrupted
+    corrupted_cache=None,  # Pre-traced corrupted baseline (see trace_corrupted_states)
 ):
     """
     Runs a single causal trace.  Given a model and a batch input where
@@ -419,6 +421,31 @@ def trace_with_patch(
     To trace the effect of just a single state, this can be just a single
     token/layer pair.  To trace the effect of restoring a set of states,
     any number of token indices and layers can be listed.
+
+    states_to_sever (optional) lists further (token_index, layername) pairs that,
+    AFTER states_to_patch is applied as above, are forced back to the value they
+    would have taken under corruption alone -- undoing both any restoration
+    states_to_patch gave that position and anything the network recovered there
+    naturally. states_to_patch alone asks "is this state sufficient by itself";
+    adding states_to_sever asks "is this state necessary for what states_to_patch
+    recovers" by taking it away and watching how much of the sufficiency result
+    survives -- ROME's Fig. 3 "severed MLP" design (this pipeline's own, unused,
+    trace_with_repatch was a direct but stale port of that same design; this
+    supersedes it by reusing the corruption/cross-model code below instead of
+    duplicating it).
+
+    Severing needs one extra forward: the corrupted-alone value at a severed
+    position is per-sample (every corrupted row drew its own noise), so unlike a
+    patch source it can't be read off a single row-0 value -- it has to come from
+    an actual corrupted-alone forward. That forward is this same function, called
+    with states_to_patch=[]. Noise is freshly reseeded (see `rs` below) on every
+    call, so that baseline call and this call draw the IDENTICAL corruption with
+    no extra bookkeeping -- this is the specific bug in trace_with_repatch that
+    this design avoids: there, both passes shared one RandomState across the call,
+    so the second pass's draw was never the same as the first's.
+    corrupted_cache lets a sweep over many severing configurations on the same
+    sentence hoist that forward once, exactly like source_cache does for the
+    clean source (see trace_corrupted_states).
     """
 
     rs = numpy.random.RandomState(1)  # For reproducibility, use pseudorandom noise
@@ -431,14 +458,18 @@ def trace_with_patch(
     for t, l in states_to_patch:
         patch_spec[l].append(t)
 
+    sever_spec = defaultdict(list)
+    for t, l in (states_to_sever or []):
+        sever_spec[l].append(t)
+
     embed_layername = layername(model_target, 0, "embed")
 
     def untuple(x):
         return x[0] if isinstance(x, tuple) else x
-    
+
     # =========================================================================
     # MODIFIED: Extract Clean States from the Source Model
-    # We must run this completely before defining the patch rule so the 
+    # We must run this completely before defining the patch rule so the
     # data actually exists when the target model goes looking for it.
     # =========================================================================
     # The source is never noised and never patched (patch_rep below is attached to the
@@ -455,6 +486,22 @@ def trace_with_patch(
             model_source(**inp)
     else:
         source_trace = None
+
+    # Corrupted-alone baseline for states_to_sever (see docstring). Recurses one level
+    # only: the inner call has states_to_sever=None, so this branch never fires there.
+    sever_layers = list(sever_spec.keys())
+    if not sever_layers:
+        corrupted_baseline, sever_layer_index = None, {}
+    elif corrupted_cache is not None:
+        corrupted_baseline, sever_layer_index = corrupted_cache
+    else:
+        _, corrupted_baseline = trace_with_patch(
+            model_source, model_target, inp,
+            states_to_patch=[], tokens_to_mixs=tokens_to_mixs,
+            noise=noise, uniform_noise=uniform_noise, replace=replace,
+            trace_layers=sever_layers,
+        )
+        sever_layer_index = {l: i for i, l in enumerate(sever_layers)}
 
     # Define the model-patching rule.
     if isinstance(noise, float):
@@ -477,18 +524,25 @@ def trace_with_patch(
                     else:
                         x[1:, b:e] += noise_data
             return x
-        if layer not in patch_spec:
+        if layer not in patch_spec and layer not in sever_spec:
             return x
-        # If this layer is in the patch_spec, restore the uncorrupted hidden state
-        # for selected tokens.
-        
         h = untuple(x)
 
-        # MODIFIED: Reach back into cache and grab the source model's clean state
-        source_clean_h = untuple(source_trace[layer].output)
+        if layer in patch_spec:
+            # Restore the uncorrupted hidden state for selected tokens.
+            # MODIFIED: Reach back into cache and grab the source model's clean state
+            source_clean_h = untuple(source_trace[layer].output)
+            for t in patch_spec[layer]:
+                h[1:, t] = source_clean_h[0, t]
 
-        for t in patch_spec[layer]:
-            h[1:, t] = source_clean_h[0, t]
+        if layer in sever_spec:
+            # Force selected tokens back to the corrupted-alone value, undoing
+            # whatever patch_spec (or the network itself) put there. Applied after
+            # patch_spec above so severing always wins on any token in both.
+            corrupted_h = corrupted_baseline[:, :, sever_layer_index[layer]].to(h.device)
+            for t in sever_spec[layer]:
+                h[1:, t] = corrupted_h[1:, t]
+
         return x
 
     # With the patching rules defined, run the patched model in inference.
@@ -496,7 +550,7 @@ def trace_with_patch(
 
     with torch.no_grad(), nethook.TraceDict(
         model_target,
-        [embed_layername] + list(patch_spec.keys()) + additional_layers,
+        [embed_layername] + list(patch_spec.keys()) + list(sever_spec.keys()) + additional_layers,
         edit_output=patch_rep,
     ) as td:
         outputs_exp = model_target(**inp)
@@ -509,6 +563,26 @@ def trace_with_patch(
         return outputs_exp, all_traced
 
     return outputs_exp
+
+
+def trace_corrupted_states(model_source, model_target, inp, layers, tokens_to_mixs,
+                            noise, uniform_noise=False, replace=False):
+    """One corrupted-alone forward on the TARGET, retaining every layer a severing sweep
+    (states_to_sever) will need. Mirrors trace_source_states's hoisting, for the same
+    reason: without it, trace_with_patch would rerun this identical forward once per
+    severed (token, layer) cell in a sweep, instead of once per sentence.
+
+    Returns (trace, layer_index) -- pass straight through as trace_with_patch's
+    corrupted_cache= for every cell of that sweep.
+    """
+    layers = list(layers)
+    _, trace = trace_with_patch(
+        model_source, model_target, inp,
+        states_to_patch=[], tokens_to_mixs=tokens_to_mixs,
+        noise=noise, uniform_noise=uniform_noise, replace=replace,
+        trace_layers=layers,
+    )
+    return trace, {l: i for i, l in enumerate(layers)}
 
 def trace_with_repatch(
     model,  # The model
