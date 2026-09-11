@@ -25,13 +25,21 @@ Part 2 — Cross-patch distributional distance
       Both computed per layer; reported separately for subject positions (16)
       and target positions (16), plus the combined mean over all 32 positions.
 
-NIE  = (raw_patched_score - mean_low) / (mean_high - mean_low)
-       Normalized to each model's own effect gap. Scale-invariant.
+NIE  = (raw_patched_score_signed - mean_low_signed) / (mean_high_signed - mean_low_signed)
+       Normalized to each model's own effect gap, on the SIGNED (stereo-minus-anti,
+       not absolute-value) chain -- so a position that restores the anti-stereotype
+       preference doesn't score identically to one that restores the stereotype.
+       Scale-invariant, but NOT a pure rescaling of Absolute Log Prob Diff (see below).
+       Degenerate (near-zero pooled signed gap -- e.g. a domain split roughly evenly
+       between stereotype- and anti-stereotype-preferring cases) reports as unavailable
+       ('n/a' / None) for that domain rather than dividing by ~0.
 Absolute Log Prob Diff = raw patched score = |(1/N) sum_i log P(s_i | s<i; stereo)
                          - (1/N) sum_i log P(s_i | s<i; anti)|
        Mean per-token log probability difference across all N non-BOS tokens.
        Sentence-level metric (not single target-token log prob). Always >= 0.
        Not normalized by effect gap. Captures absolute magnitude changes.
+       Unlike NIE above, this is the ABSOLUTE-value chain -- the two metrics are
+       independent quantities now, not a rescaling of one into the other.
 
 K columns:
   col 0 = subject position  (bias_mean   / states_score field)
@@ -62,7 +70,7 @@ import zipfile
 from plot_utils import (
     MODEL_CONFIGS, local_cases_dir, CROSS_PATCH_BASE, CROSS_PATCH_CONFIGS,
     collect_scores, load_npz_local, load_npz_zip, partition_names,
-    zip_cases_prefix, ZIP_PATH, MAIN_ZIP,
+    zip_cases_prefix, ZIP_PATH, MAIN_ZIP, normalized_indirect_effect,
 )
 
 DOMAINS = ['gender', 'profession', 'race']
@@ -78,8 +86,11 @@ def main_zip_prefix(domain):
 
 def load_K(model, org, ck_dir, domain, source):
     """
-    Load subject and target position scores for one (model, checkpoint, domain).
-    Returns (subj_scores, tgt_scores, mean_high, mean_low) — each of shape (16,).
+    Load subject and target position scores for one (model, checkpoint, domain),
+    both chains: abs (for Absolute Log Prob Diff) and signed (for NIE).
+    Returns (subj, tgt, mh, ml, subj_s, tgt_s, mh_s, ml_s) — arrays of shape (16,),
+    scalars for the *_s (signed) high/low. The signed fields are None if the result
+    files predate scores_signed (collect_scores(signed=True) finds nothing to read).
     source: 'zip' | 'main_zip' | 'local'
     """
     if source == 'main_zip':
@@ -102,8 +113,9 @@ def load_K(model, org, ck_dir, domain, source):
         files  = [os.path.join(d, f) for f in single]
         loader = load_npz_local
     # collect_scores returns: bias_mean (subject), pre_blank_mean, blank_mean (target), n, mh, ml
-    subj, _, tgt, n, mh, ml = collect_scores(files, loader)
-    return subj, tgt, mh, ml
+    subj,   _, tgt,   n, mh,   ml   = collect_scores(files, loader)
+    subj_s, _, tgt_s, _, mh_s, ml_s = collect_scores(files, loader, signed=True)
+    return subj, tgt, mh, ml, subj_s, tgt_s, mh_s, ml_s
 
 
 # ── Part 1: Within-model patching ────────────────────────────────────────────
@@ -123,11 +135,21 @@ INST_ORG    = MODEL_CONFIGS[INST_MODEL]['org']
 results = {}
 
 for domain in DOMAINS:
-    subj_b, tgt_b, mh_b, ml_b = load_K(BASE_MODEL, BASE_ORG, BASE_CKPT, domain, 'main_zip')
-    subj_i, tgt_i, mh_i, ml_i = load_K(INST_MODEL, INST_ORG, INST_CKPT, domain, 'local')
+    subj_b, tgt_b, mh_b, ml_b, subj_b_s, tgt_b_s, mh_b_s, ml_b_s = \
+        load_K(BASE_MODEL, BASE_ORG, BASE_CKPT, domain, 'main_zip')
+    subj_i, tgt_i, mh_i, ml_i, subj_i_s, tgt_i_s, mh_i_s, ml_i_s = \
+        load_K(INST_MODEL, INST_ORG, INST_CKPT, domain, 'local')
 
-    gap_b = mh_b - ml_b
+    gap_b = mh_b - ml_b     # abs chain -- Absolute Log Prob Diff
     gap_i = mh_i - ml_i
+
+    # signed chain -- NIE. None on either side means a result file predates
+    # scores_signed; NIE is reported as unavailable for that domain rather than
+    # silently falling back to the abs chain.
+    have_signed = subj_b_s is not None and subj_i_s is not None
+    if have_signed:
+        gap_b_s = mh_b_s - ml_b_s
+        gap_i_s = mh_i_s - ml_i_s
 
     if domain == 'gender':
         print("\n=== Part 1 RAW gender values (before NIE) — abs log prob diff, micro-avg per layer ===")
@@ -149,35 +171,46 @@ for domain in DOMAINS:
         for l in range(16):
             print(f"L{l}: {tgt_i[l]}")
 
-    # Compact per-domain subject-position L0 summary (ALP vs NIE, all domains)
-    nie_b_subj = (subj_b - ml_b) / gap_b   # (16,)
-    nie_i_subj = (subj_i - ml_i) / gap_i
+    # Absolute Log Prob Diff: raw abs scores, no normalization
+    alp_b = np.concatenate([subj_b, tgt_b])
+    alp_i = np.concatenate([subj_i, tgt_i])
+    diff_alp = alp_i - alp_b
+
     print(f"\n--- {domain.upper()} subject-position summary ---")
-    print(f"effect_gap        : base={gap_b:.4f}  instruct={gap_i:.4f}")
+    print(f"effect_gap (abs)  : base={gap_b:.4f}  instruct={gap_i:.4f}")
     print(f"ALP@L0 (subject)  : base={subj_b[0]:.4f}  instruct={subj_i[0]:.4f}   "
           f"[max ALP: base L{int(subj_b.argmax())}={subj_b.max():.4f}, "
           f"instruct L{int(subj_i.argmax())}={subj_i.max():.4f}]")
-    print(f"NIE@L0 (subject)  : base={nie_b_subj[0]:.4f}  instruct={nie_i_subj[0]:.4f}   "
-          f"[max NIE: base L{int(nie_b_subj.argmax())}={nie_b_subj.max():.4f}, "
-          f"instruct L{int(nie_i_subj.argmax())}={nie_i_subj.max():.4f}]")
 
-    # NIE: normalize each model to its own effect gap
-    nie_b = np.concatenate([(subj_b - ml_b) / gap_b, (tgt_b - ml_b) / gap_b])
-    nie_i = np.concatenate([(subj_i - ml_i) / gap_i, (tgt_i - ml_i) / gap_i])
+    if have_signed:
+        # Compact per-domain subject-position L0 summary, and the 32-entry K vector,
+        # both through the one shared NIE definition (signed chain; see plot_utils).
+        nie_b_subj = normalized_indirect_effect(subj_b_s, ml_b_s, gap_b_s, degenerate='nan', signed=True)
+        nie_i_subj = normalized_indirect_effect(subj_i_s, ml_i_s, gap_i_s, degenerate='nan', signed=True)
+        print(f"effect_gap (signed): base={gap_b_s:.4f}  instruct={gap_i_s:.4f}")
+        print(f"NIE@L0 (subject)  : base={nie_b_subj[0]:.4f}  instruct={nie_i_subj[0]:.4f}   "
+              f"[max NIE: base L{int(nie_b_subj.argmax())}={nie_b_subj.max():.4f}, "
+              f"instruct L{int(nie_i_subj.argmax())}={nie_i_subj.max():.4f}]")
 
-    # Absolute Log Prob Diff: raw scores, no normalization
-    alp_b = np.concatenate([subj_b, tgt_b])
-    alp_i = np.concatenate([subj_i, tgt_i])
-
-    diff_nie = nie_i - nie_b
-    diff_alp = alp_i - alp_b
+        nie_b = np.concatenate([
+            normalized_indirect_effect(subj_b_s, ml_b_s, gap_b_s, degenerate='nan', signed=True),
+            normalized_indirect_effect(tgt_b_s,  ml_b_s, gap_b_s, degenerate='nan', signed=True),
+        ])
+        nie_i = np.concatenate([
+            normalized_indirect_effect(subj_i_s, ml_i_s, gap_i_s, degenerate='nan', signed=True),
+            normalized_indirect_effect(tgt_i_s,  ml_i_s, gap_i_s, degenerate='nan', signed=True),
+        ])
+        nie_ok = bool(np.all(np.isfinite(nie_b)) and np.all(np.isfinite(nie_i)))
+    else:
+        print('NIE               : n/a -- these result files predate scores_signed')
+        nie_ok = False
 
     results[domain] = {
-        'max_nie': diff_nie.max(),
-        'min_nie': diff_nie.min(),
-        'corr_nie': pearsonr(nie_i, nie_b)[0],
-        'max_alp': diff_alp.max(),
-        'min_alp': diff_alp.min(),
+        'max_nie':  float((nie_i - nie_b).max()) if nie_ok else None,
+        'min_nie':  float((nie_i - nie_b).min()) if nie_ok else None,
+        'corr_nie': float(pearsonr(nie_i, nie_b)[0]) if nie_ok else None,
+        'max_alp':  diff_alp.max(),
+        'min_alp':  diff_alp.min(),
         'corr_alp': pearsonr(alp_i, alp_b)[0],
     }
 
@@ -195,13 +228,20 @@ metrics = [
     ('corr_alp', 'Pearson corr(instruct_K, base_K) — Absolute Log Prob Diff'),
 ]
 
+def _fmt(v, width):
+    return f'{v:>{width}.4f}' if v is not None else f'{"n/a":>{width}}'
+
 for key, label in metrics:
     vals = [results[d][key] for d in DOMAINS]
-    print(f'{label:<45} {vals[0]:>8.4f} {vals[1]:>10.4f} {vals[2]:>8.4f}')
+    print(f'{label:<45} {_fmt(vals[0], 8)} {_fmt(vals[1], 10)} {_fmt(vals[2], 8)}')
 
 print()
-print('Note: Pearson corr is identical for NIE and Absolute Log Prob Diff because')
-print('NIE is a linear rescaling of Absolute Log Prob Diff (Pearson is scale-invariant).')
+print('Note: NIE is now computed on the SIGNED chain (see plot_utils.normalized_indirect_effect)')
+print('while Absolute Log Prob Diff stays on the abs chain -- they are independent quantities,')
+print('not a rescaling of one into the other, so their Pearson correlations can differ.')
+print('NIE reports "n/a" for a domain whose pooled signed effect_gap is ~0 (e.g. split roughly')
+print('evenly between stereotype- and anti-stereotype-preferring cases) or whose result files')
+print('predate scores_signed.')
 print()
 print('Note: min(instruct_K - base_K) for Absolute Log Prob Diff > 0 for all domains.')
 print('This means every single K position increased in absolute signal after post-training.')
