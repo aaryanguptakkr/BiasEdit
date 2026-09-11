@@ -714,6 +714,63 @@ def _validate_result_group(file_lists, loader, expected, label):
         return False
 
 
+def _finalize_result_dict(single_items, attn_items, mlp_items, loader, num_layer):
+    """Shared tail for every within-model/cross-patch loader below: collect both the
+    abs chain (ALP, always) and the signed chain (NIE, when the result files carry
+    scores_signed), zero-fill missing attn/mlp/word arrays, and assemble the one result
+    dict shape every figure function reads. Was duplicated near-verbatim across four
+    loaders before this; pulling it out means every figure gets the signed chain the
+    same way, from one place, rather than four copies that could drift apart.
+
+    Returns None if the single-state files have no valid (abs) scores at all.
+    """
+    bias_mean, pre_blank_mean, blank_mean, n_cases, mean_high, mean_low = \
+        collect_scores(single_items, loader)
+    attn_mean, _, _, _, _, _ = collect_scores(attn_items, loader)
+    mlp_mean,  _, _, _, _, _ = collect_scores(mlp_items,  loader)
+    if bias_mean is None:
+        return None
+
+    bias_mean_s, pre_blank_mean_s, blank_mean_s, _, mean_high_s, mean_low_s = \
+        collect_scores(single_items, loader, signed=True)
+    attn_mean_s, _, _, _, _, _ = collect_scores(attn_items, loader, signed=True)
+    mlp_mean_s,  _, _, _, _, _ = collect_scores(mlp_items,  loader, signed=True)
+    have_signed = bias_mean_s is not None
+
+    zero           = np.zeros(num_layer)
+    attn_mean      = attn_mean      if attn_mean      is not None else zero
+    mlp_mean       = mlp_mean       if mlp_mean       is not None else zero
+    pre_blank_mean = pre_blank_mean if pre_blank_mean is not None else zero
+    blank_mean     = blank_mean     if blank_mean     is not None else zero
+    effect_gap     = mean_high - mean_low
+
+    return {
+        'bias_mean':      bias_mean,
+        'pre_blank_mean': pre_blank_mean,
+        'blank_mean':     blank_mean,
+        'attn_mean':      attn_mean,
+        'mlp_mean':       mlp_mean,
+        'n_cases':        n_cases,
+        'mean_high':      mean_high,
+        'mean_low':       mean_low,
+        'effect_gap':     effect_gap,
+        'low_sig':        effect_gap < LOW_SIGNAL,
+        'num_layer':      num_layer,
+        # signed chain -- NIE only. None (not zero-filled) when scores_signed isn't in
+        # the result files, so callers can tell "no signal" from "no data" apart -- the
+        # same distinction _finalize_result_dict's caller made for the abs chain via
+        # bias_mean is None above.
+        'bias_mean_signed':      bias_mean_s      if have_signed else None,
+        'pre_blank_mean_signed': pre_blank_mean_s if have_signed else None,
+        'blank_mean_signed':     blank_mean_s     if have_signed else None,
+        'attn_mean_signed':      attn_mean_s      if have_signed else None,
+        'mlp_mean_signed':       mlp_mean_s       if have_signed else None,
+        'mean_high_signed':      mean_high_s      if have_signed else None,
+        'mean_low_signed':       mean_low_s       if have_signed else None,
+        'effect_gap_signed':     (mean_high_s - mean_low_s) if have_signed else None,
+    }
+
+
 def load_cross_patch_domain(direction_key, domain, num_sample=None, family='olmo_1b'):
     """
     Load cross-patch .npz files for one (family, direction, domain) triple.
@@ -776,35 +833,10 @@ def load_cross_patch_domain(direction_key, domain, num_sample=None, family='olmo
         print(f'    Cannot read sample: {ex}; skipping.')
         return None
 
-    bias_mean, pre_blank_mean, blank_mean, n_cases, mean_high, mean_low = \
-        collect_scores(single_items, load_npz_local)
-    attn_mean, _, _, _, _, _ = collect_scores(attn_items, load_npz_local)
-    mlp_mean,  _, _, _, _, _ = collect_scores(mlp_items,  load_npz_local)
-
-    if bias_mean is None:
+    result = _finalize_result_dict(single_items, attn_items, mlp_items, load_npz_local, num_layer)
+    if result is None:
         print('    No valid scores; skipping.')
-        return None
-
-    zero           = np.zeros(num_layer)
-    attn_mean      = attn_mean      if attn_mean      is not None else zero
-    mlp_mean       = mlp_mean       if mlp_mean       is not None else zero
-    pre_blank_mean = pre_blank_mean if pre_blank_mean is not None else zero
-    blank_mean     = blank_mean     if blank_mean     is not None else zero
-
-    effect_gap = mean_high - mean_low
-    return {
-        'bias_mean':      bias_mean,
-        'pre_blank_mean': pre_blank_mean,
-        'blank_mean':     blank_mean,
-        'attn_mean':      attn_mean,
-        'mlp_mean':       mlp_mean,
-        'n_cases':        n_cases,
-        'mean_high':      mean_high,
-        'mean_low':       mean_low,
-        'effect_gap':     effect_gap,
-        'low_sig':        effect_gap < LOW_SIGNAL,
-        'num_layer':      num_layer,
-    }
+    return result
 
 
 def save_cross_patch_direction(direction_key, domain_results, out_dir, family_label=''):
@@ -1013,34 +1045,7 @@ def load_within_model_from_zip(zf, zip_names_all, model_name, org, checkpoint, d
         print(f'    [4panel] Cannot read sample: {ex}')
         return None
 
-    bias_mean, pre_blank_mean, blank_mean, n_cases, mean_high, mean_low = \
-        collect_scores(single_items, loader)
-    attn_mean, _, _, _, _, _ = collect_scores(attn_items, loader)
-    mlp_mean,  _, _, _, _, _ = collect_scores(mlp_items,  loader)
-
-    if bias_mean is None:
-        return None
-
-    zero           = np.zeros(num_layer)
-    attn_mean      = attn_mean      if attn_mean      is not None else zero
-    mlp_mean       = mlp_mean       if mlp_mean       is not None else zero
-    pre_blank_mean = pre_blank_mean if pre_blank_mean is not None else zero
-    blank_mean     = blank_mean     if blank_mean     is not None else zero
-
-    effect_gap = mean_high - mean_low
-    return {
-        'bias_mean':      bias_mean,
-        'pre_blank_mean': pre_blank_mean,
-        'blank_mean':     blank_mean,
-        'attn_mean':      attn_mean,
-        'mlp_mean':       mlp_mean,
-        'n_cases':        n_cases,
-        'mean_high':      mean_high,
-        'mean_low':       mean_low,
-        'effect_gap':     effect_gap,
-        'low_sig':        effect_gap < LOW_SIGNAL,
-        'num_layer':      num_layer,
-    }
+    return _finalize_result_dict(single_items, attn_items, mlp_items, loader, num_layer)
 
 
 def load_within_model_from_local(model_name, org, checkpoint, domain, num_sample=None):
@@ -1084,34 +1089,7 @@ def load_within_model_from_local(model_name, org, checkpoint, domain, num_sample
         print(f'    [4panel] Cannot read sample: {ex}')
         return None
 
-    bias_mean, pre_blank_mean, blank_mean, n_cases, mean_high, mean_low = \
-        collect_scores(single_items, loader)
-    attn_mean, _, _, _, _, _ = collect_scores(attn_items, loader)
-    mlp_mean,  _, _, _, _, _ = collect_scores(mlp_items,  loader)
-
-    if bias_mean is None:
-        return None
-
-    zero           = np.zeros(num_layer)
-    attn_mean      = attn_mean      if attn_mean      is not None else zero
-    mlp_mean       = mlp_mean       if mlp_mean       is not None else zero
-    pre_blank_mean = pre_blank_mean if pre_blank_mean is not None else zero
-    blank_mean     = blank_mean     if blank_mean     is not None else zero
-
-    effect_gap = mean_high - mean_low
-    return {
-        'bias_mean':      bias_mean,
-        'pre_blank_mean': pre_blank_mean,
-        'blank_mean':     blank_mean,
-        'attn_mean':      attn_mean,
-        'mlp_mean':       mlp_mean,
-        'n_cases':        n_cases,
-        'mean_high':      mean_high,
-        'mean_low':       mean_low,
-        'effect_gap':     effect_gap,
-        'low_sig':        effect_gap < LOW_SIGNAL,
-        'num_layer':      num_layer,
-    }
+    return _finalize_result_dict(single_items, attn_items, mlp_items, loader, num_layer)
 
 
 def save_cross_patch_4panel(within_model_panels, all_direction_results, domains, out_dir,
@@ -1338,31 +1316,7 @@ def _load_from_main_zip(main_zf, domain, num_sample=None):
     except Exception as ex:
         print(f'    [main.zip] Cannot read sample: {ex}')
         return None
-    bias_mean, pre_blank_mean, blank_mean, n_cases, mean_high, mean_low = \
-        collect_scores(single_items, loader)
-    attn_mean, _, _, _, _, _ = collect_scores(attn_items, loader)
-    mlp_mean,  _, _, _, _, _ = collect_scores(mlp_items,  loader)
-    if bias_mean is None:
-        return None
-    zero           = np.zeros(num_layer)
-    attn_mean      = attn_mean      if attn_mean      is not None else zero
-    mlp_mean       = mlp_mean       if mlp_mean       is not None else zero
-    pre_blank_mean = pre_blank_mean if pre_blank_mean is not None else zero
-    blank_mean     = blank_mean     if blank_mean     is not None else zero
-    effect_gap = mean_high - mean_low
-    return {
-        'bias_mean':      bias_mean,
-        'pre_blank_mean': pre_blank_mean,
-        'blank_mean':     blank_mean,
-        'attn_mean':      attn_mean,
-        'mlp_mean':       mlp_mean,
-        'n_cases':        n_cases,
-        'mean_high':      mean_high,
-        'mean_low':       mean_low,
-        'effect_gap':     effect_gap,
-        'low_sig':        effect_gap < LOW_SIGNAL,
-        'num_layer':      num_layer,
-    }
+    return _finalize_result_dict(single_items, attn_items, mlp_items, loader, num_layer)
 
 
 # ── appendix grid helpers ─────────────────────────────────────────────────────
@@ -1577,20 +1531,23 @@ def save_appendix_A3_nie_lines(out_dir, num_sample=None, main_zf=None):
     ]
 
     def _nie(res, key):
-        """Compute NIE for a given data key in a result dict."""
+        """Compute NIE for a given data key in a result dict -- signed chain, same
+        definition as everywhere else. None if the field, the signed data, or a
+        large-enough signed gap isn't available (see signed_gap_reliable)."""
         key_map = {
-            'bias':      'bias_mean',
-            'mlp':       'mlp_mean',
-            'attn':      'attn_mean',
-            'pre_blank': 'pre_blank_mean',
-            'blank':     'blank_mean',
+            'bias':      'bias_mean_signed',
+            'mlp':       'mlp_mean_signed',
+            'attn':      'attn_mean_signed',
+            'pre_blank': 'pre_blank_mean_signed',
+            'blank':     'blank_mean_signed',
         }
         if res is None:
             return None
         arr = res.get(key_map[key])
-        if arr is None:
+        gap_s, low_s = res.get('effect_gap_signed'), res.get('mean_low_signed')
+        if arr is None or low_s is None or not signed_gap_reliable(gap_s):
             return None
-        return normalized_indirect_effect(arr, res['mean_low'], res['effect_gap'])   # None if gap <= 0
+        return normalized_indirect_effect(arr, low_s, gap_s, signed=True)
 
     # compute Y ranges separately for states rows and words rows
     states_vals, words_vals = [], []
@@ -1732,10 +1689,17 @@ def save_main_body_nie_overlay(out_dir, num_sample=None, main_zf=None):
     NIE_LABELS = ['States', 'MLP window', 'Attn window']
 
     def _nie(res, key):
-        key_map = {'states_score': 'bias_mean', 'mlp_score': 'mlp_mean', 'attn_score': 'attn_mean'}
+        """Signed-chain NIE, same definition as everywhere else. None if res, the
+        signed data, or a large-enough signed gap isn't available."""
+        key_map = {'states_score': 'bias_mean_signed', 'mlp_score': 'mlp_mean_signed',
+                   'attn_score': 'attn_mean_signed'}
         if res is None:
             return None
-        return normalized_indirect_effect(res[key_map[key]], res['mean_low'], res['effect_gap'])   # None if gap <= 0
+        arr = res.get(key_map[key])
+        gap_s, low_s = res.get('effect_gap_signed'), res.get('mean_low_signed')
+        if arr is None or low_s is None or not signed_gap_reliable(gap_s):
+            return None
+        return normalized_indirect_effect(arr, low_s, gap_s, signed=True)
 
     all_vals = []
     for key in SCORE_KEYS:
@@ -1833,10 +1797,16 @@ def save_main_body_pre_post_crosspatch(out_dir, num_sample=None, main_zf=None):
     p2pre_res  = load_cross_patch_domain('post_to_pre', DOMAIN, num_sample)
 
     def _nie(res, key):
-        key_map = {'bias': 'bias_mean', 'mlp': 'mlp_mean', 'attn': 'attn_mean'}
+        """Signed-chain NIE, same definition as everywhere else. None if res, the
+        signed data, or a large-enough signed gap isn't available."""
+        key_map = {'bias': 'bias_mean_signed', 'mlp': 'mlp_mean_signed', 'attn': 'attn_mean_signed'}
         if res is None:
             return None
-        return normalized_indirect_effect(res[key_map[key]], res['mean_low'], res['effect_gap'])   # None if gap <= 0
+        arr = res.get(key_map[key])
+        gap_s, low_s = res.get('effect_gap_signed'), res.get('mean_low_signed')
+        if arr is None or low_s is None or not signed_gap_reliable(gap_s):
+            return None
+        return normalized_indirect_effect(arr, low_s, gap_s, signed=True)
 
     # (a) within-model overlay: 3 conditions, Pre solid / Post dashed
     COND_KEYS   = ('bias', 'mlp', 'attn')
@@ -1973,14 +1943,17 @@ def save_crosspatch_nie_overlay(out_dir, num_sample=None, main_zf=None):
     WORDS_LABELS_SHORT  = ['Effect of subject token', 'Effect of pre-target token', 'Effect of target token']
 
     def _nie(res, key):
-        key_map = {'bias': 'bias_mean', 'mlp': 'mlp_mean', 'attn': 'attn_mean',
-                   'pre_blank': 'pre_blank_mean', 'blank': 'blank_mean'}
+        """Signed-chain NIE, same definition as everywhere else. None if res, the
+        signed data, or a large-enough signed gap isn't available."""
+        key_map = {'bias': 'bias_mean_signed', 'mlp': 'mlp_mean_signed', 'attn': 'attn_mean_signed',
+                   'pre_blank': 'pre_blank_mean_signed', 'blank': 'blank_mean_signed'}
         if res is None:
             return None
         arr = res.get(key_map[key])
-        if arr is None:
+        gap_s, low_s = res.get('effect_gap_signed'), res.get('mean_low_signed')
+        if arr is None or low_s is None or not signed_gap_reliable(gap_s):
             return None
-        return normalized_indirect_effect(arr, res['mean_low'], res['effect_gap'])   # None if gap <= 0
+        return normalized_indirect_effect(arr, low_s, gap_s, signed=True)
 
     states_vals, words_vals = [], []
     for results_dict in (pre_results, post_results, p2post_results, p2pre_results):
@@ -2239,14 +2212,15 @@ def save_appendix_A6_heatmap(base_stats, instruct_stats, out_dir, num_sample=Non
     # attn_score in stats = _attn.npz = restored window of Attn outputs
     # mlp_score  in stats = _mlp.npz  = restored window of MLP outputs
     conditions = [
-        (STATES_LABELS[0], 'states_score', 'bias_mean'),
-        (STATES_LABELS[1], 'mlp_score',    'mlp_mean'),
-        (STATES_LABELS[2], 'attn_score',   'attn_mean'),
+        (STATES_LABELS[0], 'states_score_signed', 'bias_mean_signed'),
+        (STATES_LABELS[1], 'mlp_score_signed',    'mlp_mean_signed'),
+        (STATES_LABELS[2], 'attn_score_signed',   'attn_mean_signed'),
     ]
 
-    # Load step_2000 from local NFS (full result dict with mean_low + effect_gap).
-    # Other checkpoints are read from stats.json which stores raw ALP;
-    # both are normalized to NIE via (alp - mean_low) / effect_gap — same as A3.
+    # Load step_2000 from local NFS (full result dict, signed chain included via
+    # _finalize_result_dict). Other checkpoints are read from stats.json, which stores
+    # the same signed chain (see the per-checkpoint loop that builds all_ckpt_stats) --
+    # both go through _to_nie below, same as A3.
     step2000_local = {}
     for domain in PAPER_DOMAINS:
         res = load_within_model_from_local(
@@ -2254,16 +2228,22 @@ def save_appendix_A6_heatmap(base_stats, instruct_stats, out_dir, num_sample=Non
         if res is not None:
             step2000_local[domain] = res
 
-    def _to_nie(alp_arr, mean_low, effect_gap):
-        return normalized_indirect_effect(alp_arr, mean_low, effect_gap, degenerate='zero')
+    def _to_nie(signed_arr, mean_low_signed, effect_gap_signed):
+        """Signed-chain NIE; None if the array, low anchor, or gap magnitude
+        (see signed_gap_reliable) aren't available."""
+        if signed_arr is None or mean_low_signed is None or not signed_gap_reliable(effect_gap_signed):
+            return None
+        return normalized_indirect_effect(signed_arr, mean_low_signed, effect_gap_signed,
+                                          degenerate='zero', signed=True)
 
     def _get_from_stats(stats_list, domain, key):
-        """Return [(label, nie_array)] normalizing stored raw ALP to NIE."""
+        """Return [(label, nie_array)] from the domain's signed chain. Points with no
+        signed data, or too small a signed gap to trust, are omitted."""
         out = []
         for e in stats_list:
             d = e['domains'].get(domain, {})
-            if key in d and 'mean_low' in d and 'effect_gap' in d:
-                nie = _to_nie(d[key], d['mean_low'], d['effect_gap'])
+            nie = _to_nie(d.get(key), d.get('mean_low_signed'), d.get('effect_gap_signed'))
+            if nie is not None:
                 out.append((e['label'], nie))
         return out
 
@@ -2281,11 +2261,15 @@ def save_appendix_A6_heatmap(base_stats, instruct_stats, out_dir, num_sample=Non
             if label == 'step1400' and not step2000_inserted:
                 if domain in step2000_local:
                     r = step2000_local[domain]
-                    inst_ordered.append(('step2000', _to_nie(r[local_key], r['mean_low'], r['effect_gap'])))
+                    nie = _to_nie(r.get(local_key), r.get('mean_low_signed'), r.get('effect_gap_signed'))
+                    if nie is not None:
+                        inst_ordered.append(('step2000', nie))
                 step2000_inserted = True
         if not step2000_inserted and domain in step2000_local:
             r = step2000_local[domain]
-            inst_ordered.append(('step2000', _to_nie(r[local_key], r['mean_low'], r['effect_gap'])))
+            nie = _to_nie(r.get(local_key), r.get('mean_low_signed'), r.get('effect_gap_signed'))
+            if nie is not None:
+                inst_ordered.append(('step2000', nie))
 
         all_pts = base_pts + inst_ordered
         if not all_pts:
