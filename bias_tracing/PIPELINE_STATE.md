@@ -31,6 +31,88 @@ Everything below fills in the boxes with real numbers and explains the two place
 (`H`→`I` for cross-model, and the `K`/`M` pooling step) where the picture above hides
 a real problem.
 
+### 0.1 Box `H` is really *three* runs — single state, MLP window, Attn window
+
+Box `H` above says "restore that ONE clean state". That is only the first of **three
+separate passes** the pipeline makes over every case (`bias_trace.py`, `for kind in None,
+"mlp", "attn"`). Each pass restores a *different kind of thing*, writes its own result
+file, and becomes its own bar in the figures. They are never combined inside one run.
+
+```mermaid
+flowchart TD
+    S["One case\n(subject-token embeddings noised)"]
+    S --> R1["kind = None\nrestore model.layers.l\n= the whole decoder block's output\n= the hidden state h_i^(l)"]
+    S --> R2["kind = 'mlp'\nrestore model.layers.L.mlp\nfor L across a WINDOW of layers"]
+    S --> R3["kind = 'attn'\nrestore model.layers.L.self_attn\nfor L across a WINDOW of layers"]
+    R1 --> F1["knowledge_ID.npz"]
+    R2 --> F2["knowledge_ID_mlp.npz"]
+    R3 --> F3["knowledge_ID_attn.npz"]
+    F1 & F2 & F3 --> P["plot_utils.partition_names()\nsplits by filename suffix"]
+    P --> B["three bars per figure:\nsingle state / MLP window restore / Attn window restore"]
+```
+
+**What is actually hooked.** All three go through the same `trace_with_patch`; only the
+module name differs (`layername(model, l, kind)`). On OLMo-2-1B:
+
+| `kind` | module hooked | class | what gets overwritten |
+|---|---|---|---|
+| `None` | `model.layers.{l}` | `Olmo2DecoderLayer` | the block's whole output — the hidden state |
+| `"mlp"` | `model.layers.{l}.mlp` | `Olmo2MLP` | only the MLP contribution `m_i^(l)` |
+| `"attn"` | `model.layers.{l}.self_attn` | `Olmo2Attention` | only the attention contribution `a_i^(l)` |
+
+In the residual stream `h^(l) = h^(l-1) + a^(l) + m^(l)`, the `mlp`/`attn` runs force **one
+summand** to its clean value; the incoming residual `h^(l-1)` stays corrupted. So the
+hidden state is never restored in those runs — it is only nudged, because one of the three
+things that build it changed. The `kind=None` run is the opposite: it overwrites `h^(l)`
+outright, which also replaces that layer's own attention and MLP contributions.
+
+### 0.2 Why the MLP/Attn runs need a *window*
+
+A single `m_i^(l)` is a small additive term in the residual stream, so restoring one on its
+own barely moves the output — the effect is lost in the noise. ROME's fix, which we
+inherited, is to restore **several consecutive layers at once** at the same token
+(`trace_important_window`). The patch list for the cell at layer `l` is
+
+```python
+range(max(0, l - window // 2), min(num_layers, l - (-window // 2)))
+```
+
+so for `l = 8`, `window = 10`, 16 layers → layers **[3,4,5,6,7,8,9,10,11,12]**: ten module
+outputs, all at **one** token position, restored simultaneously. Two properties worth
+knowing:
+
+- **It is off-centre when `window` is even** — five layers below `l`, `l` itself, four
+  above. `main` now derives an odd default from depth (`2*(L//8)+1`), but every result file
+  produced before that carries `window=10`, which the npz records.
+- **Ten layers is 62 % of a 16-layer model.** ROME chose 10 for GPT-2 XL, where it is 21 %
+  of 48 layers. The wider the window relative to depth, the closer "restore a window" gets
+  to "restore most of that pathway", which is a limit on how *localized* any MLP/Attn claim
+  from these bars can be.
+
+**Real numbers**, same case as §2 (`knowledge_f6f70a1dfd48cf2694ecff300548492b`, base
+OLMo-2-1B, tokens `['<|endoftext|>','My',' father',' is',' a',' emotional','.']`, subject
+rows `[2,3]`, fill rows `[5,6]`, `high=0.7248`, `low=0.7226`):
+
+| run | file | grid | peak \|ALP\| | at |
+|---|---|---|---|---|
+| single state | `…492b.npz` | `(7, 16)` | 0.9696 | token 4, layer 13 |
+| MLP window | `…492b_mlp.npz` | `(7, 16)` | 1.0701 | token 4, layer 15 |
+| Attn window | `…492b_attn.npz` | `(7, 16)` | 0.9225 | token 4, layer 9 |
+
+Same grid shape, same token axis, different experiments — and note the peaks land at
+different layers, which is the entire reason the three bars are plotted side by side.
+
+### 0.3 What these bars are *not*
+
+They are **restore** experiments: clean values are put back, and the score says how much
+the model recovers. ROME's paper also runs a different experiment it calls **"severing"**
+(§2.2 / Fig. 3): freeze a sublayer at its *corrupted* values while restoring a single
+state, to test whether the effect *needs* that pathway. Upstream BiasEdit labelled its
+window-restore bars "Effect with Attn/MLP severed", which is ROME's term for that other
+experiment; `38cc18d` renamed ours to "MLP/Attn window restore" (and fixed a bar↔file swap
+of our own). Severing was explored in `3d00194` and reverted in `3bed2ca` — no severing
+code remains, so no figure here may use the word "severed".
+
 ---
 
 ## 1. Two metrics — keep them separate in your head and in the writing
