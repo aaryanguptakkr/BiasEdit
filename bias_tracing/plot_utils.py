@@ -485,10 +485,18 @@ def collect_scores(file_list, loader, signed=False):
       file) are skipped like any other read failure, so a signed collection can legitimately
       return fewer/zero usable files than the abs collection over the same file_list.
 
+    Averaging is per-case first, then across cases: a case's own subject-token (or
+    target-token) rows are meaned into one (n_layers,) row for that case *before* it
+    is combined with other cases. Without this, a case whose subject or target span
+    tokenizes into more subword pieces (which varies by tokenizer and by domain, not
+    by anything about the model's behavior) would contribute proportionally more rows
+    to the pooled mean than a case with a single-token span -- silently reweighting
+    the aggregate by tokenization granularity rather than by number of cases.
+
     Returns:
-      bias_mean      (n_layers,)  mean score at subject token positions
+      bias_mean      (n_layers,)  mean-of-per-case-means at subject token positions
       pre_blank_mean (n_layers,)  mean score at token before prediction target
-      blank_mean     (n_layers,)  mean score at prediction target positions
+      blank_mean     (n_layers,)  mean-of-per-case-means at prediction target positions
       n_cases        int
       mean_high      float  mean clean-run log prob diff (abs, or signed if signed=True)
       mean_low       float  mean corrupted-run log prob diff (abs, or signed if signed=True)
@@ -503,13 +511,14 @@ def collect_scores(file_list, loader, signed=False):
         try:
             d = loader(item)
             scores = d[score_key]
-            for b, e in d['corrupt_range_anti']:
-                bias_word.append(scores[b:e])
+            case_bias_rows = [scores[b:e] for b, e in d['corrupt_range_anti']]
+            if case_bias_rows:
+                bias_word.append(np.mean(np.concatenate(case_bias_rows, axis=0), axis=0))
             idx0 = int(d['blank_idxs_anti'][0])
             idx1 = int(d['blank_idxs_anti'][1]) if len(d['blank_idxs_anti']) > 1 else idx0 + 1
             if idx0 > 0:
-                pre_blank.append(scores[idx0 - 1][np.newaxis, :])
-            blank.append(scores[idx0:idx1])
+                pre_blank.append(scores[idx0 - 1])
+            blank.append(np.mean(scores[idx0:idx1], axis=0))
             highs.append(float(d[high_key]))
             lows.append(float(d[low_key]))
         except Exception as exc:
@@ -519,9 +528,9 @@ def collect_scores(file_list, loader, signed=False):
         return None, None, None, 0, 0.0, 0.0
     n_layers = bias_word[0].shape[-1]
     return (
-        np.mean(np.concatenate(bias_word, axis=0), axis=0),
-        np.mean(np.concatenate(pre_blank, axis=0), axis=0) if pre_blank else np.zeros(n_layers),
-        np.mean(np.concatenate(blank,     axis=0), axis=0),
+        np.mean(np.stack(bias_word, axis=0), axis=0),
+        np.mean(np.stack(pre_blank, axis=0), axis=0) if pre_blank else np.zeros(n_layers),
+        np.mean(np.stack(blank,     axis=0), axis=0),
         len(highs),
         float(np.mean(highs)),
         float(np.mean(lows)),

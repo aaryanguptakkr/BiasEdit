@@ -216,7 +216,13 @@ def save_cross_checkpoint(domain_arrays, plot_type, model_name, domain, out_dir)
 
     fig, axes = plt.subplots(nrows, ncols,
                              figsize=(FIG_GRID_W_PER_COL * ncols, FIG_ROW_H * nrows))
-    axes_flat = axes.flatten() if n > 1 else [axes]
+    # plt.subplots(nrows, ncols) with ncols hardcoded to 2 never returns a bare Axes,
+    # even when n == 1 -- it's always at least a (2,) array (one real subplot, one
+    # empty one hidden below). `if n > 1 else [axes]` assumed the bare-Axes case could
+    # happen here; it can't, so that branch wrapped a (2,)-array in another list and
+    # crashed the first `.bar()` call downstream on whichever (model, domain) happened
+    # to have exactly one item to plot.
+    axes_flat = np.atleast_1d(axes).flatten()
     fig.suptitle(f'{domain.title()} bias {title_suffix} — {model_name} (all checkpoints)',
                  fontsize=FS_SUPTITLE, fontweight='bold')
 
@@ -473,7 +479,13 @@ def save_bias_delta(ckpt_stats_list, model_name, out_dir):
         fig, axes = plt.subplots(nrows, ncols,
                                  figsize=(FIG_GRID_W_PER_COL * ncols, FIG_ROW_H * nrows),
                                  constrained_layout=True)
-        axes_flat = axes.flatten() if n > 1 else [axes]
+        # plt.subplots(nrows, ncols) with ncols hardcoded to 2 never returns a bare Axes,
+        # even when n == 1 -- it's always at least a (2,) array (one real subplot, one
+        # empty one hidden below). `if n > 1 else [axes]` assumed the bare-Axes case could
+        # happen here; it can't, so that branch wrapped a (2,)-array in another list and
+        # crashed the first `.bar()` call downstream on whichever (model, domain) happened
+        # to have exactly one item to plot.
+        axes_flat = np.atleast_1d(axes).flatten()
 
         fig.suptitle(
             f'{model_name} — {domain.capitalize()} bias: Δ per layer vs. previous checkpoint\n'
@@ -665,7 +677,13 @@ def save_base_vs_instruct(base_stats, instruct_stats, out_dir):
         fig, axes = plt.subplots(nrows, ncols,
                                  figsize=(FIG_GRID_W_PER_COL * ncols, FIG_ROW_H * nrows),
                                  constrained_layout=True)
-        axes_flat = axes.flatten() if n > 1 else [axes]
+        # plt.subplots(nrows, ncols) with ncols hardcoded to 2 never returns a bare Axes,
+        # even when n == 1 -- it's always at least a (2,) array (one real subplot, one
+        # empty one hidden below). `if n > 1 else [axes]` assumed the bare-Axes case could
+        # happen here; it can't, so that branch wrapped a (2,)-array in another list and
+        # crashed the first `.bar()` call downstream on whichever (model, domain) happened
+        # to have exactly one item to plot.
+        axes_flat = np.atleast_1d(axes).flatten()
 
         fig.suptitle(
             f'OLMo-2-0425-1B — {domain.capitalize()} bias: Base vs. Instruct\n'
