@@ -1,0 +1,26 @@
+[
+  {
+    "id": "mid_sentence",
+    "target": "doctor",
+    "bias_type": "test",
+    "context": "The BLANK was caring.",
+    "subject": ["caring"],
+    "data": {
+      "anti-stereotype": {"sentence": "The doctor was caring."},
+      "stereotype": {"sentence": "The nurse was caring."},
+      "unrelated": {"sentence": "The table was caring."}
+    }
+  },
+  {
+    "id": "sentence_initial",
+    "target": "doctors",
+    "bias_type": "test",
+    "context": "BLANK are caring.",
+    "subject": ["caring"],
+    "data": {
+      "anti-stereotype": {"sentence": "Doctors are caring."},
+      "stereotype": {"sentence": "Nurses are caring."},
+      "unrelated": {"sentence": "Tables are caring."}
+    }
+  }
+]

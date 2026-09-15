@@ -178,7 +178,7 @@ outputs, all at **one** token position, restored simultaneously. Two properties 
 OLMo-2-1B, tokens `['<|endoftext|>','My',' father',' is',' a',' emotional','.']`, subject rows
 `[2,3]`, fill rows `[5,6]`, `high=0.7248`, `low=0.7226`):
 
-| run | file | grid | peak \|ALP\| | at |
+| run | file | grid | peak ALP | at |
 |---|---|---|---|---|
 | single state | `…492b.npz` | `(7, 16)` | 0.9696 | token 4, layer 13 |
 | MLP window | `…492b_mlp.npz` | `(7, 16)` | 1.0701 | token 4, layer 15 |
@@ -501,3 +501,328 @@ before finalizing any headline number that depends on the signed chain.**
 | Within-model report (NIE table, trajectory) | `fig.py::save_stats_and_report`, `save_bias_trajectory` |
 | Cross-model probe (source of §7/§10's numbers) | `verification/cross_model_scale_probe.py` |
 | Comparison table for the paper | `scripts/table.py` |
+
+---
+
+## 14. What we changed from the original BiasEdit, and why
+
+This project began as a copy of `zjunlp/BiasEdit`'s `bias_tracing/`. This section lists
+every change that affects a number, in plain language, with a worked example wherever the
+change is not self-explanatory. Measurements come from the gpt2-medium parity run
+(`verification/parity_gpt2_medium/`), where the **same 63 gender cases** were traced twice:
+once with the original code, once with ours.
+
+**The most important fact first: the metric did not change.** On every shared case the clean
+score `high_score` is identical to four decimal places — `max|difference| = 0.0000`. So none
+of what follows is "we measure something else now". We measure the same thing, on a
+subject that is properly corrupted, over a window that fits the model, averaged in a way
+that treats each case equally.
+
+### 14.1 Corrupting the subject: first mention → every mention
+
+**Before:** the code found the *first* place the subject word appeared and added noise there.
+**Now:** it finds every occurrence, and merges overlapping spans before noising.
+
+*Worked example.* Take a sentence where the subject word appears twice:
+
+> "My **father** works hard because **father** knows best."
+
+The old code noised the first `father` and left the second one untouched. But the model can
+simply read the subject identity off the surviving copy — so the "corrupted" run was not
+really corrupted, and `low_score` came out too close to `high_score`. The effect we are
+trying to measure is `high − low`, so a too-high `low` shrinks the very quantity the paper
+reports.
+
+*Why ours is better.* An ablation has to remove the thing. Leaving a clean copy in the
+sentence is like testing whether a light switch works while a second switch is still on.
+
+*Size of the effect.* 36 StereoSet cases are affected (25 gender, 11 profession, 2 race). In
+the parity run, **15 of 63 gender cases** got a different `low_score` — and all 15 are exactly
+the cases with more than one subject span. Every single-span case matched to the last digit.
+
+*A subtle one worth knowing.* Matching is case-sensitive, so a case annotated `['she','She']`
+already had both mentions corrupted, while one annotated `['he']` had only one. Under the old
+code, **how completely the subject was ablated depended on how the annotator capitalised
+things** — not on anything about the model.
+
+### 14.2 Averaging across cases: pooling tokens (micro) → per case (macro)
+
+This one changes no data at all — only how the per-case numbers are combined into the bar
+chart — yet it moves a headline result, so it is worth being precise about.
+
+**Before (micro):** take every subject-token row from every case, pile them all into one big
+stack, average the stack.
+**Now (macro):** average the rows *within* each case first, so each case produces one number
+per layer; then average across cases.
+
+*Worked example.* Two cases, looking at one layer:
+
+| case | subject | tokens | that layer's values |
+|---|---|---|---|
+| A | "girl" | 1 token | 0.90 |
+| B | "stepfather" | 2 tokens | 0.10, 0.30 |
+
+- **Micro** pools three rows: `(0.90 + 0.10 + 0.30) / 3 = 0.43`
+- **Macro** averages within each case first: case A = 0.90, case B = `(0.10+0.30)/2 = 0.20`,
+  then across cases: `(0.90 + 0.20) / 2 = 0.55`
+
+Same numbers in, different answers out. Micro let case B count **twice as much as case A**,
+purely because the tokenizer split "stepfather" into two pieces.
+
+*Why ours is better — practically.* How many tokens a word splits into tracks how rare the
+word is, and nothing else. Under micro, rare multi-token subjects quietly dominate the
+average. Worse for us specifically: different tokenizers split the same word differently, so
+a micro-averaged comparison between two model families is partly a comparison of their
+tokenizers.
+
+*Why ours is better — theoretically.* The case is the unit of analysis. Each case is one
+observation of "does this model treat this subject stereotypically"; the tokens inside it are
+not independent repeats of that observation, they are pieces of one word. NIE is defined per
+case, ROME reports its effect averaged over statements, and any confidence interval has to
+treat the case as the independent unit.
+
+*Size of the effect.* On **identical** data, the subject bar's peak moves from **layer 0
+(micro, 0.3164)** to **layer 2 (macro, 0.3599)**. That is not a cosmetic difference: it means
+**any claim that bias localises at layer 0, inherited from micro-averaged plots, is partly an
+artifact of the weighting.** Re-check that claim against macro numbers before it goes in the
+paper.
+
+*Why the difference is this large — the weighting tracks the outcome.* Measured on the parity
+run (gpt2-medium, gender, 63 cases), the score falls **monotonically** with how many tokens
+the subject splits into:
+
+| subject tokens | cases | mean score | share of weight under micro | under macro |
+|---|---|---|---|---|
+| 1 | 32 | **0.3896** | 27.8 % | 49.2 % |
+| 2 | 23 | 0.3333 | 40.0 % | 35.4 % |
+| 3 | 7 | 0.2433 | 18.3 % | 10.8 % |
+| 4 | 2 | 0.1433 | 7.0 % | 3.1 % |
+| 8 | 1 | **0.1465** | 7.0 % | 1.5 % |
+
+One-token-subject cases average **0.3896**; multi-token cases average **0.2970** — a gap of
+0.093, roughly **three times the whole `high − low` effect** (0.029). So micro is not weighting
+by something neutral: it weights by a variable that strongly predicts the score, and it weights
+the *low*-scoring group up. One-token cases are half the data but receive 28 % of the weight;
+the single 8-token case receives as much weight as the two 4-token cases combined.
+
+There is a likely mechanical reason for the monotone decline, which makes micro worse than
+merely arbitrary: the single-state bar restores **one token at a time**. If the subject is 8
+tokens, restoring one of them repairs one-eighth of the corruption, so the score cannot move far
+from the corrupted baseline. Those rows are low because the restoration was partial, not because
+bias is absent there — and micro gives exactly those rows the most weight. (The monotone pattern
+is measured; the 1/k explanation is a reading of it, not separately tested.)
+
+### 14.3 The MLP/Attn restoration window: fixed 10 → scaled to model depth
+
+**Before:** always restore 10 consecutive layers, whatever the model.
+**Now:** `2 × (layers // 8) + 1`, always odd, minimum 3 — so 7 layers for a 24-layer model,
+5 for a 16-layer one. An explicit even or zero width is now rejected.
+
+*Why.* ROME picked 10 for GPT-2 XL, which has 48 layers — that is 21 % of the model. Copy the
+same 10 onto a 24-layer model and you are restoring 42 %; onto a 16-layer model, 62 %. At that
+width, "restore a small window" quietly becomes "restore most of that pathway", and the result
+stops being evidence of *localisation*. Scaling by depth keeps the proportion near ROME's.
+
+Two smaller bugs were fixed at the same time: `--window 0` made the layer list empty, so the
+MLP/Attn cells silently reported the corrupted baseline instead of failing; and an even width
+sits half a layer off-centre.
+
+*Size of the effect — and a warning about reading per-case numbers.* Every MLP and Attn grid
+in the parity run differs: `0/40` identical, median maximum difference **0.15** (MLP) and
+**0.11** (Attn). But almost all of that **averages out**. Holding the aggregation fixed, the
+window change moves the plotted MLP and Attn bars by only **mean 0.005**. Big per-cell
+differences, small plotted differences — do not read a per-case maximum as if it were a
+plot-level effect. §14.13 has the full decomposition.
+
+### 14.4 Finding the BLANK word: placeholder token → measured span
+
+**Before:** the fill word's position was found by substituting an `<unk>` placeholder and
+hunting for it, with hand-written special cases per tokenizer.
+**Now:** the span is *measured* — tokenize the prefix, tokenize prefix + word, the difference
+is the span — and then **verified** by decoding those tokens back and checking they spell the
+word. If verification fails, the case is skipped and logged.
+
+*Why ours is better.* The old approach asked a question the tokenizer was never designed to
+answer, and needed a new special case for every new model. The new one asks the tokenizer to
+do the only thing it is guaranteed to do consistently, and never trusts the answer without
+checking it. One mechanism now serves all six model families.
+
+### 14.5 Finding the subject: substring → whole word
+
+**Before:** plain substring search, first hit wins — so the subject `man` matched inside
+`woman`, and the noise landed on the wrong tokens.
+**Now:** whole-word matching (`find_complete_word`).
+
+*Size of the effect.* 114 of 11,384 subject lookups (1.0 %) first landed inside a longer word.
+
+### 14.6 Precision: bf16 → fp32 inside the score
+
+**Before:** the log-probabilities were computed in the model's own dtype, which is bf16 on
+GPU — roughly three decimal digits.
+**Now:** the tensor is cast to fp32 first.
+
+*Why it matters here.* The effects being measured are small (median `high − low` = 0.046), and
+bf16's rounding is the same order of magnitude as bf16's own step size at these values. On one
+real comparison the bf16 answer was `0.09375` where the true value is `0.09762`. Same formula,
+just computed accurately.
+
+### 14.7 Keeping the direction of the effect
+
+**Before:** the score was made absolute immediately, inside the scoring function, so whether
+the model leaned *toward* or *away from* the stereotype was thrown away and could never be
+recovered from a saved file.
+**Now:** the signed value is stored, and `abs()` is applied by the caller when the absolute
+metric is wanted. `|signed| == the old value`, exactly — nothing about the reported number
+changed, but direction is now recoverable (§4).
+
+### 14.8 Naming the MLP/Attn bars honestly
+
+There were **two independent errors** here, from two different sources. Keeping them apart
+matters, because only one of them was inherited.
+
+**Error 1 — the word "severed" (inherited from upstream).** Both codebases labelled these bars
+"Effect with Attn severed" / "Effect with MLP severed". That is ROME's name for a *different*
+experiment: freezing a sublayer at its corrupted values while restoring a single state (ROME
+§2.2, Fig. 3), implemented by `trace_with_repatch`. Grounded in upstream's own code:
+
+```
+bias_trace.py:190   for kind in None, "mlp", "attn":          # the loop that makes the files
+bias_trace.py:195   filename = f".../knowledge_{id}{kind_suffix}.npz"
+bias_trace.py:493   if not kind: trace_important_states(...)  # single-state bar
+bias_trace.py:505   else:        trace_important_window(...)  # BOTH _mlp.npz and _attn.npz
+fig.py:99-101       effect_attn_severed = attn_bias_mean      # read from _attn.npz
+fig.py:115-116      plt.bar(r2, effect_attn_severed, label='Effect with Attn severed')
+```
+
+and `grep -rn trace_with_repatch` over the whole upstream repo returns exactly one line — the
+`def` at `bias_trace.py:331`. **Zero callers.** There is no code path from a severing function
+to a `.npz` to a plot, in either codebase. So the bars labelled "severed" have always
+contained window-restore numbers.
+
+*Consequence, measured:* upstream's "MLP severed" bar and our "MLP window restore" bar agree to
+**mean 0.005**; "Attn severed" vs "Attn window restore" to **mean 0.004**. They look identical
+because they are the same computation — the residue is only window 10 vs 7 plus the
+repeated-subject fix.
+
+**Error 2 — the swap (ours alone, NOT upstream's).** Upstream paired each label with the
+correct sublayer: `_attn.npz` → "Attn severed", `_mlp.npz` → "MLP severed". Our own plotting
+code, from `d22e759` (2026-05-12) until `38cc18d` (2026-09-01), put the labels on the *opposite*
+data, and wrote it down as if it were a convention:
+
+```python
+def raw_arrays(s):
+    """Return (states, mlp_only, attn_only) raw log prob diff arrays.
+    Order matches bar chart convention:
+      2nd bar (red)   = mlp-only restore = 'Effect with Attn severed'
+      3rd bar (green) = attn-only restore = 'Effect with MLP severed'
+    """
+```
+
+So in **our** figures made before 2026-09-01, the bar labelled "Attn severed" is MLP data and
+vice versa. **Any figure in `plots/` dated before that commit has its red and green legends
+exchanged** and should be regenerated before use.
+
+**Now:** "MLP window restore" / "Attn window restore", each on its own data (§3).
+
+*Why it matters.* A reader who sees "severed" reasonably believes we tested whether the effect
+*needs* the MLP pathway; a window restore cannot answer that. And a swapped legend inverts the
+MLP-vs-attention conclusion, which is the main claim these bars are used for. The words bars
+were renamed for a related reason: upstream called the subject "bias attribute words" and the
+fill "attribute terms" — two different things with nearly the same name.
+
+### 14.9 Things added that upstream simply did not have
+
+- **Cross-model patching.** Upstream traces one model. Ours patches a source model's clean
+  activations into a target model's corrupted run, with `validate_model_pair()` checking
+  up-front that layer count, hidden size, tokenizer and token ids match — so "same address"
+  is guaranteed before anything is spliced (§6).
+- **Provenance in every result file:** which metric, which source and target model, which
+  direction, how many layers, what window. Upstream's files record none of this, which is why
+  an old file cannot be checked against the code that produced it (§12).
+- **A refusal to overwrite.** If a result file was produced under a different metric or
+  direction, the pipeline raises instead of silently recomputing over it.
+- **A second scoring span** (blank-only) stored alongside the reported one, from the same
+  forward passes at no extra cost, so the "is the whole-sentence average diluting the signal?"
+  question can be answered without re-running anything (§8).
+
+### 14.10 Things removed
+
+- **The masked-LM path** (BERT/RoBERTa). This project is causal-only; the dead branch was
+  deleted rather than left to rot.
+- **`trace_with_repatch`.** Upstream carried ROME's severing function but never called it. Ours
+  did the same for a while. It was also buggy — it shared one random seed across its two
+  internal passes, so the pass that *recorded* the corrupted values and the pass that *used*
+  them never saw the same noise. Deleted rather than kept as a trap (§11).
+
+### 14.11 What we did *not* change, and should disclose
+
+- **The noise scale** is still calibrated on `data/knowns.json` — ROME's 1,209 Wikipedia
+  entity names, of which only 14 are StereoSet subjects. Measured across five model families,
+  switching to a StereoSet-derived list moves σ by at most 6 %, which is well inside the
+  arbitrariness of the 3× factor itself. Immaterial, but say so in the paper rather than
+  leaving it to be discovered.
+- **The unequal-length case skip.** Cases whose two sentences tokenize to different lengths are
+  still dropped, as upstream dropped them (silently; ours logs it). This is not laziness — see
+  `UNEQUAL_LENGTH_PROBLEM.md`: under whole-sentence scoring those cases cannot be scored
+  correctly at all, because the shared prefix stops cancelling and contributes an artifact
+  larger than the signal.
+- **Gaussian noise on the embedding** as the corruption, following ROME. No
+  token-substitution cross-check has been run.
+
+### 14.12 The short version
+
+Eight changes. The first three move numbers on the plots; the rest fix correctness,
+precision, or honesty. Nothing here changes *what* is being measured — only whether the
+measurement is done properly.
+
+| # | The change | What went wrong before, concretely | Why the new way is right | How much it moved |
+|---|---|---|---|---|
+| **1** | **Corrupt every mention of the subject**, not just the first | If the subject word appeared twice — *"My **father** works hard because **father** knows best"* — only the first copy was noised. The model could still read who the sentence was about off the second one, so the "corrupted" run still contained the answer. | An ablation has to actually remove the thing. Otherwise `low_score` comes out too close to `high_score`, and `high − low` — the exact quantity the paper reports — is understated. | 36 cases affected; **15 of 63** gender cases changed, all of them multi-mention cases |
+| **2** | **Average per case (macro)**, not per token (micro) | Every subject-token row from every case was poured into one pile and averaged. A case whose subject split into 3 tokens counted **3×** as much as a case whose subject was 1 token. | How many tokens a word splits into tracks how *rare* the word is, nothing more — so the old way quietly let rare subjects dominate. A case is one observation of the model's behaviour; the pieces of one word are not three separate observations. | Subject-bar peak moves **layer 0 → layer 2** on *identical* data |
+| **3** | **Scale the restoration window to model depth** (10 fixed → `2×(L//8)+1`) | ROME chose 10 layers for a 48-layer model — about a fifth of it. The same 10 on our 16-layer models restores **62 % of the network**. | You cannot call a result "localised" if you had to restore most of the model to get it. Scaling keeps the window a small slice, as ROME intended. | **Every** MLP/Attn grid differs; median max-diff **0.15** |
+| **4** | **Measure the BLANK span, then verify it** | The old code inserted a placeholder token, hunted for it, and needed hand-written special cases for each tokenizer. | Ask the tokenizer to do the one thing it does reliably — tokenize a prefix, then prefix + word, and take the difference — then decode the span back and check it spells the word. Trust, but verify. One mechanism now covers all six model families. | Removed every per-tokenizer special case; unverifiable cases are now skipped and logged instead of silently mislocated |
+| **5** | **Match the subject as a whole word** | Plain substring search: the subject `man` matched inside `wo**man**`, so the noise landed on the wrong tokens entirely. | The thing you corrupt has to be the thing you meant to corrupt. | **114 of 11,384** subject lookups (1.0 %) |
+| **6** | **Compute the score in fp32** | Log-probabilities were computed in the model's own bf16 — about three decimal digits of precision. | The effects we measure are around 0.05, so bf16's rounding error was the same size as the signal. Same formula, just computed accurately. | One real comparison: bf16 gave `0.09375` where the true value is `0.09762` |
+| **7** | **Store the signed score** | `abs()` was applied inside the scoring function, so "this model leaned *anti*-stereotypical here" was erased before anything was saved — unrecoverable from the file. | You can always get magnitude from a signed number; you can never get direction back from a magnitude. The reported (absolute) number is unchanged — taking `abs()` of the stored signed score gives back exactly the old value. | No change to any reported value; direction is now available |
+| **8** | **Name the bars after the experiment we ran** | The bars said "Effect with Attn/MLP **severed**" — ROME's name for a different experiment (freezing a sublayer), which this pipeline has never run. Upstream also paired each label with the *other* sublayer's data. | A legend is a claim about what was computed. "Severed" tells a reader we tested whether the effect *needs* the MLP pathway; a window restore cannot answer that. | No numbers change — but the old figures made a claim the data could not support |
+
+### 14.13 Which change actually moves the plots — and why the bars look alike
+
+Two plots differ in two ways at once (data *and* aggregation), so neither can be blamed
+without building the missing middle. Same 63 gender cases, gpt2-medium, each bar built three
+ways:
+
+| | how it is built | single-state | MLP | Attn |
+|---|---|---|---|---|
+| **A** | upstream data + micro — *the upstream plot* | L0, 0.3148 | L0, 0.3142 | L3, 0.3006 |
+| **B** | **current** data + micro — *built only to isolate* | L0, 0.3208 | L0, 0.3211 | L14, 0.3030 |
+| **C** | current data + macro — *our plot* | L0, 0.3601 | L0, 0.3605 | L3, 0.3391 |
+
+**A→B = every data change** (§14.1, §14.3): mean **0.005**.
+**B→C = the aggregation change** (§14.2): mean **0.035** — seven times larger.
+
+So the aggregation rule, not the window, is what visibly separates the two sets of plots. The
+window really does move each case's grid by ~0.15 (§14.3), but those shifts go up as often as
+down and cancel across cases. Worth remembering generally: **a large per-case difference is
+not evidence of a large plotted difference.**
+
+**Why all three bars sit at nearly the same height.** This is a property of the data, not of
+either codebase:
+
+```
+gender, n=63, current:   mean_high = 0.3587   mean_low = 0.3301   gap = 0.0286
+   single-state bar: 0.3322 - 0.3601   (spread 0.028)
+   MLP bar:          0.3253 - 0.3605   (spread 0.035)
+   Attn bar:         0.3291 - 0.3391   (spread 0.010)
+```
+
+The gap is the entire vertical range a restoration can land in, and it is **0.029**. Every
+bar at every layer sits inside that band, so every bar resembles every other one; the largest
+separation between any two bars at any layer (0.027) is the size of the whole effect. Two
+consequences: **a near-flat bar is not a finding** — the Attn bar spans 0.010 across 24
+layers and its "peak" jumps L3→L14 under a change worth 0.002, so peak layers of low-spread
+bars are noise; and this is **§8's small-gap problem seen directly**, whose cheapest test is
+the blank-only chain already stored in every result file — no new runs required.
+
+Upstream's figures have the same property (gap 0.0385, bars 0.32–0.36), so it is inherited
+from the method, not introduced here.
