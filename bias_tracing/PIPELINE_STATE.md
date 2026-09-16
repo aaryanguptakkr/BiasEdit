@@ -536,7 +536,7 @@ reports.
 *Why ours is better.* An ablation has to remove the thing. Leaving a clean copy in the
 sentence is like testing whether a light switch works while a second switch is still on.
 
-*Size of the effect.* 36 StereoSet cases are affected (25 gender, 11 profession, 2 race). In
+*Size of the effect.* 38 StereoSet cases are affected (25 gender, 11 profession, 2 race). In
 the parity run, **15 of 63 gender cases** got a different `low_score` — and all 15 are exactly
 the cases with more than one subject span. Every single-span case matched to the last digit.
 

@@ -264,12 +264,19 @@ print('This means every single K position increased in absolute signal after pos
 def load_per_token_K(files, loader):
     """
     Load token-level subject and target position Absolute Log Prob Diff scores.
-    Pools EVERY subject/target token row across ALL cases (micro granularity) —
-    the same aggregation collect_scores uses for the 4-panel plot bars. The
-    per-layer mean of the returned subject array therefore equals the plotted
-    bias_mean[l] (the blue "Effect of single state" bar) exactly. We keep the
-    full pooled token rows (not per-case means) so the W1/JSD distributions are
-    over the same observations the bars average.
+    Pools EVERY subject/target token row across ALL cases (micro granularity),
+    deliberately -- so the W1/JSD distributions in Part 2 are over individual
+    token observations, not per-case means.
+
+    STALE CLAIM, kept only as a record of what changed: this docstring used to
+    say the per-layer mean of the returned subject array equals the plotted
+    bias_mean[l] exactly. That was true when collect_scores also pooled by
+    token; collect_scores now averages each case's own rows into one before
+    pooling across cases (see its docstring), so the two no longer match in
+    general -- this function's micro pooling and collect_scores's macro
+    pooling are now two different, independently-chosen aggregations, not one
+    computation read two ways. Revisit whether Part 2 should switch to macro
+    too the next time this function is touched; not decided here.
 
     Subject is the position we actually report (the states plot is subject-only);
     target is still returned so callers retain the ability to compute it.
