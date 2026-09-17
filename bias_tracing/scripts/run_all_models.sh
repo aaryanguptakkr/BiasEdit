@@ -45,6 +45,30 @@
 #
 # SURVIVING A DISCONNECT: launch it detached, or it dies with your shell —
 #     setsid nohup ./run_all_models.sh 7 olmo > /dev/null 2>&1 &
+# A run was lost exactly this way: the process was a child of a terminal session and died
+# when that session ended. The per-run logs below are written either way.
+#
+# STOPPING: kill the campaign by PID (`kill <pid>`). Do NOT use `pkill -f run_all_models` —
+# the pattern also matches the shell you type it in, which kills your own session.
+#
+# WHERE THE OUTPUT GOES — everything lands under one results root, chosen with the layout
+# (shared package -> <pkg>/results, owner checkout -> <repo>/results_v2):
+#     <results>/<model_base>/<run_name>/causal_trace/cases/*.npz   the numbers, one per case
+#     <results>/<model_base>/<run_name>/causal_trace/pdfs/*.pdf    per-case heatmaps
+#     <results>/checkpoints/<model>/<branch>/<domain>/...          checkpoint runs
+#     <results>/logs/<model>_<domain>.log                          one live log per run
+# Aggregate (paper) figures are NOT produced here — that is a separate fig.py step, run by
+# the project owner afterwards from these .npz files.
+#
+# HOW LONG: roughly 8-12 seconds per case; a domain is 800-1500 cases, so 2-5 hours per run
+# depending on model and domain. The full matrix is 69 runs, i.e. several days on one card —
+# which is why splitting families across GPUs is worth it.
+#
+# WHAT A SHARED PACKAGE CONTAINS, if you are reading this from one:
+#     run_all_models.sh   this file          repo/       pipeline code + StereoSet data
+#     env/                python 3.10.19, torch 2.5.1+cu121, transformers 5.3.0
+#     hf_cache/           model weights, used offline (HF_HUB_OFFLINE=1, never downloads)
+#     results/            output, created on first run
 #
 # ---------------------------------------------------------------------------------------
 # NO PREREQUISITES. The shared package under /deepfreeze/share carries its own code, data,
@@ -138,8 +162,12 @@ MATRIX=(
 usage() { sed -n '2,30p' "$0"; exit "${1:-0}"; }
 [[ $# -eq 0 ]] && usage 1
 [[ "$1" == "--list" ]] && { printf '%s\n' "${MATRIX[@]}" | column -t -s'|'; exit 0; }
+[[ "$1" == "-h" || "$1" == "--help" ]] && usage 0
 
 GPU="$1"; shift
+# The first argument is the GPU id. Validate it: without this check any stray flag or typo
+# becomes CUDA_VISIBLE_DEVICES and the campaign starts anyway, on whatever device CUDA picks.
+[[ "$GPU" =~ ^[0-9]+$ ]] || { echo "first argument must be a GPU id (a number), got '$GPU'" >&2; usage 1; }
 FAMILIES="all"; KINDS=""; MODE=""; DOMAINS_CSV="$ALL_DOMAINS"; DRY_RUN=""
 [[ $# -gt 0 && "$1" != --* ]] && { FAMILIES="$1"; shift; }
 for a in "$@"; do
