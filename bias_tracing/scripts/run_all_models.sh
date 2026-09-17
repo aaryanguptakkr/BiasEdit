@@ -198,6 +198,13 @@ KINDS="${KINDS:-all}"
 # "all" domains means the three in scope — religion is not part of "all" for this project.
 [[ "$DOMAINS_CSV" == "all" ]] && DOMAINS_CSV="$ALL_DOMAINS"
 [[ "$FAMILIES" == "all" ]] && FAMILIES="olmo,pythia,qwen,llama,gemma"
+# Order the CUDA devices the way nvidia-smi does. Without this, CUDA defaults to
+# FASTEST_FIRST and reorders the cards by capability, so on this mixed-GPU host
+# (2x RTX 2080 Ti 11G + 2x RTX A6000 48G) the A6000s are promoted to indices 0-1 and
+# `<gpu_id> 3` silently lands on the 2080 Ti that nvidia-smi calls card 2 — a different,
+# possibly busy, and far smaller card than the one asked for. PCI_BUS_ID makes the id
+# passed on the command line mean the same card nvidia-smi shows under that index.
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES="$GPU"
 IFS=',' read -ra DOMAINS <<< "$DOMAINS_CSV"
 
@@ -239,6 +246,12 @@ total=${#RUNS[@]}
 
 echo "=== campaign  gpu=$GPU  families=$FAMILIES  kinds=$KINDS  domains=$DOMAINS_CSV  runs=$total ==="
 echo "=== host $(hostname)  env/cache: $WHERE ==="
+# Name the physical card, so a mis-numbered run is obvious in the first line of the log
+# rather than three hours in. CUDA_DEVICE_ORDER=PCI_BUS_ID above makes this query, which is
+# always in nvidia-smi's own order, agree with what the run will actually see as device 0.
+gpu_name="$(nvidia-smi --id="$GPU" --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null)"
+[[ -n "$gpu_name" ]] || gpu_name="UNKNOWN — nvidia-smi could not read card $GPU"
+echo "=== gpu $GPU: $gpu_name ==="
 echo "=== started $(date) ==="
 [[ -n "$DRY_RUN" ]] && echo "(dry run — no GPU work will be done)"
 
