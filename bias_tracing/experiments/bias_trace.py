@@ -823,6 +823,20 @@ class ModelAndTokenizer:
             # failure is silent, the only reliable test is to tokenize something and look.
             # A checkpoint shares its model's tokenizer by construction, so the default
             # revision is the correct fallback, not merely a working one.
+            #
+            # VERIFIED FOR THESE REVISIONS ONLY -- extend this list when adding a model that
+            # is traced at a revision, and re-check that the empty tokenizer really yields
+            # zero tokens for it:
+            #     EleutherAI/pythia-1b    step0, step1000, step5000, step81000,
+            #                             step137000, step143000
+            #     allenai/OLMo-2-0425-1B  stage1-step10000-tokens21B
+            # All seven return a 2-token vocabulary ({<|endoftext|>, <|padding|>}) at the
+            # revision and tokenize any string, including the empty one, to zero tokens.
+            # The check below relies on that. A model whose degraded tokenizer instead emits
+            # one automatic token -- a BOS, say -- would return length 1 and slip past it;
+            # OLMo normally does prepend a BOS, and does not here only because the degraded
+            # vocabulary has none to add. If that ever happens, test the vocabulary size
+            # instead (a real one is tens of thousands, the degraded one is 2).
             tokenizer = _load_tokenizer(branch)
             if branch is not None and len(tokenizer("probe")["input_ids"]) == 0:
                 print(f"[tokenizer] revision {branch!r} publishes no tokenizer; "
