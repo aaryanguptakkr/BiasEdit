@@ -803,14 +803,31 @@ class ModelAndTokenizer:
     ):
         if tokenizer is None:
             assert model_name is not None
-            if any(k in model_name.lower() for k in ("qwen", "llama-3", "gemma")):
-                tokenizer = AutoTokenizer.from_pretrained(model_name, revision=branch)
-            elif "llama" in model_name.lower():
-                tokenizer = LlamaTokenizer.from_pretrained(model_name, revision=branch)
-            elif model_name=="gpt2-medium":
-                tokenizer = GPT2Tokenizer.from_pretrained(model_name, revision=branch)
-            else:
-                tokenizer = AutoTokenizer.from_pretrained(model_name, revision=branch)
+
+            def _load_tokenizer(revision):
+                if any(k in model_name.lower() for k in ("qwen", "llama-3", "gemma")):
+                    return AutoTokenizer.from_pretrained(model_name, revision=revision)
+                if "llama" in model_name.lower():
+                    return LlamaTokenizer.from_pretrained(model_name, revision=revision)
+                if model_name == "gpt2-medium":
+                    return GPT2Tokenizer.from_pretrained(model_name, revision=revision)
+                return AutoTokenizer.from_pretrained(model_name, revision=revision)
+
+            # Use the requested revision when it actually publishes a tokenizer, and fall
+            # back to the default revision when it does not. Training checkpoints are often
+            # weights-only: pythia-1b's step0 and OLMo's stage1-step10000-tokens21B contain
+            # just config.json and model.safetensors. Asking for a tokenizer there does NOT
+            # raise -- transformers returns an EMPTY vocabulary, so every string tokenizes to
+            # zero tokens and the first forward dies with "cannot reshape tensor of 0
+            # elements", inside collect_embedding_std, before any tracing happens. Since the
+            # failure is silent, the only reliable test is to tokenize something and look.
+            # A checkpoint shares its model's tokenizer by construction, so the default
+            # revision is the correct fallback, not merely a working one.
+            tokenizer = _load_tokenizer(branch)
+            if branch is not None and len(tokenizer("probe")["input_ids"]) == 0:
+                print(f"[tokenizer] revision {branch!r} publishes no tokenizer; "
+                      f"falling back to the default revision of {model_name}")
+                tokenizer = _load_tokenizer(None)
                 
         if model is None:
             assert model_name is not None
