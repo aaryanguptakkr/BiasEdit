@@ -28,7 +28,16 @@ class StereoSetDataset(Dataset):
         data = json.load(open(data_path))
         fields = ["id", "target", "bias_type", "context", "data", "subject"]
         self.data = []
+        # race.json (from upstream BiasEdit) repeats 1101 ids as exact copies; keep one of each.
+        seen = {}
+        duplicates = 0
         for d in data:
+            if d["id"] in seen:
+                if json.dumps(d, sort_keys=True) != seen[d["id"]]:
+                    raise ValueError(f"id {d['id']} appears twice with different content in {data_path}")
+                duplicates += 1
+                continue
+            seen[d["id"]] = json.dumps(d, sort_keys=True)
             blank_count = sum("BLANK" in word for word in d["context"].split(" "))
             if blank_count != 1:
                 print(
@@ -37,7 +46,7 @@ class StereoSetDataset(Dataset):
                 )
                 continue
             self.data.append({k: d[k] for k in fields})
-        print(f"Loaded dataset with {len(self)} elements")
+        print(f"Loaded dataset with {len(self)} elements ({duplicates} exact duplicate rows dropped)")
 
     def __len__(self):
         return len(self.data)

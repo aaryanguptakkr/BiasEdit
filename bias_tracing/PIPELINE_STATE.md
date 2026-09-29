@@ -477,14 +477,66 @@ directly and never assumes the `[low, high]` anchoring that breaks above.
 
 ## 12. Provenance: what the existing result files are
 
-**Every currently-existing result file (local checkout, shared results root, `results.zip`,
-`main.zip`) predates the current code** — legacy format, no `score_metric`/`scores_signed`/
-provenance fields, fixed `window=10` regardless of model depth. §5's worked example uses one of
-these legacy files for its *abs-chain* numbers (unaffected by the signed-chain work), but none
-of the signed-chain code in §4/§11 has ever run against a real model. §7/§10's cross-model
-finding is the one exception — live evidence from an actual small probe
-(`verification/cross_model_scale_probe_olmo.json`), not from the legacy corpus. **Regenerate
-before finalizing any headline number that depends on the signed chain.**
+**Final results (audited 2026-09-27).** All 69 run × domain folders are complete: every case
+has its single-state, MLP and Attn file, all readable, all with the signed fields. §5's worked
+example still uses an older legacy file.
+- Self and cross runs: `<pkg>/results/<run>/`. Checkpoint runs (Pythia, OLMo stage1):
+  `<pkg>/repo/results_v2/checkpoints/`. **Do not use `<pkg>/results/v0/`**: superseded runs,
+  partly computed on RTX PRO 6000 Blackwell cards.
+- Software: torch 2.11.0+cu128, transformers 5.3.0, for every run.
+- Precision = each model's published dtype: OLMo-2 base fp32, OLMo-2-Instruct bf16, Qwen/Llama/
+  Gemma bf16, Pythia fp16. OLMo base vs Instruct therefore also differs in precision. Checked
+  on 100 OLMo base cases (34 gender, 33 profession, 33 race; deepsea GPU7, RTX A6000) run in
+  both fp32 and bf16: the NIE curves by layer differ by at most 0.004, with the same peak
+  layers (single state 0, MLP 11, Attn 2); per-case clean scores differ by 0.006 on average
+  (typical size 0.47), with no sign flips. Precision does not explain base vs Instruct
+  differences.
+- For every target model, self and cross runs give bit-identical clean and corrupted scores
+  (these depend only on the target), even when computed on different machines.
+
+**GPUs.** Every result was computed on an NVIDIA RTX A6000 (48 GB). Machine and card, per run
+(same for all three domains unless noted):
+
+| run | machine, card |
+|---|---|
+| OLMo-2 base; Instruct; Instruct→base | deepb GPU3 |
+| OLMo-2 base→Instruct | deepb GPU1 |
+| OLMo-2 stage1-step10000 | deepb GPU1; ~145 gender cases (written 2026-09-21 19:26–21:00) by a launch whose log was overwritten, machine not recorded |
+| Pythia-1b, all 6 checkpoints | deepb GPU1 |
+| Qwen2.5 base; Instruct; base→Instruct | deepdiver GPU0 |
+| Qwen2.5 Instruct→base | deepdiver GPU1 |
+| Llama-3.2 base; Instruct→base | deepdiver GPU1 |
+| Llama-3.2 Instruct | deepdiver GPU1; race by deepdiver GPU1 and GPU3 running at the same time (plus 8 files from an unrecorded launch; they match an A6000 run exactly) |
+| Llama-3.2 base→Instruct | deepdiver GPU2 |
+| Gemma-3 pt | deepb GPU3 |
+| Gemma-3 it→pt | deepb GPU1; part of gender while deepb GPU3 also ran it |
+| Gemma-3 it | deepdiver GPU0; race by deepdiver GPU0 and GPU3 running at the same time |
+| Gemma-3 pt→it | deepb GPU1 |
+
+**Cases analysed** (unique examples, after skips):
+
+| target | gender | profession | race |
+|---|---:|---:|---:|
+| OLMo-2, Llama-3.2 | 687 | 562 | 1043 |
+| Qwen2.5 | 684 | 556 | 1036 |
+| Gemma-3 | 744 | 657 | 1173 |
+| Pythia | 616 | 513 | 971 |
+
+Out of 1026 / 809 / 1446 unique examples. `race.json` (unchanged from upstream BiasEdit) lists
+its 1446 examples as 2682 rows of exact copies, so logs saying "2681 samples" overcount;
+results are unaffected (one file per example). Case sets differ by family because the skips
+depend on the tokenizer.
+
+**Small numerical caveat (re-checked 2026-09-27 on deepsea GPU7, RTX A6000, card not shared).**
+From 2026-09-22 07:22, jobs on deepb GPU1 produced slightly different numbers (the card's own
+state changed; not precision, not the code).
+- OLMo stage1: 34 gender, 530 profession, 849 race cases are affected, by at most 0.003 in
+  score. A fresh run reproduces the unaffected cases exactly and removes the deviation.
+  Negligible next to the reported effects.
+- OLMo base→Instruct gender: the last 140 cases (written after 07:22) differ from a fresh
+  run by up to 0.025 (median 0.004); the fresh run and the older `v0` run agree exactly. Its
+  profession and race runs match `v0` exactly and are unaffected.
+- The ~145 stage1 gender cases from the unrecorded launch differ from a fresh run by ~2e-6.
 
 ## 13. Concept → code
 

@@ -1,6 +1,9 @@
 import argparse
+import atexit
+import hashlib
 import json
 import os, sys
+import socket
 import datetime
 # os.chdir(sys.path[0])
 sys.path.append("./")
@@ -31,6 +34,41 @@ SCORE_METRIC_BLANK  = "blank_signed_logprob_diff_v1"      # stereo - anti, BLANK
 # Keep the two chains apart: an NIE must take its scores, high and low from ONE of them.
 # Absolute answers "how much differentiation is restored", signed answers "is the same
 # direction restored". Mixing them produces a meaningless number.
+
+
+def acquire_run_lock(result_dir):
+    """One process per output directory (O_EXCL is atomic on NFS); a dead same-host owner is taken over."""
+    path = os.path.join(result_dir, ".run.lock")
+    me = f"{socket.gethostname()} {os.getpid()} {datetime.datetime.now().isoformat()}"
+    for _ in range(2):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                host, pid = open(path).read().split()[:2]
+            except (OSError, ValueError):
+                host, pid = "?", "0"
+            stale = host == socket.gethostname() and not os.path.exists(f"/proc/{pid}")
+            if not stale:
+                raise RuntimeError(f"{result_dir} is being written by {host} pid {pid} ({path}). "
+                                   f"If that process is gone, delete the lock file and restart.")
+            os.remove(path)
+            continue
+        with os.fdopen(fd, "w") as f:
+            f.write(me + "\n")
+        atexit.register(lambda: os.path.exists(path) and os.remove(path))
+        return
+    raise RuntimeError(f"could not take {path}")
+
+
+def save_npz_atomic(filename, arrays):
+    """Write to a temp file, then rename: a case file is either absent or complete."""
+    tmp = os.path.join(os.path.dirname(filename), f".tmp.{os.getpid()}.{os.path.basename(filename)}")
+    with open(tmp, "wb") as f:
+        numpy.savez(f, **arrays)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, filename)
 
 
 def sentence_labels(inp, pad_id):
@@ -150,6 +188,7 @@ def main():
     pdf_dir = f"{output_dir}/pdfs"
     os.makedirs(result_dir, exist_ok=True)
     os.makedirs(pdf_dir, exist_ok=True)
+    acquire_run_lock(result_dir)
 
     def get_dtype(model_name):
         # Use corresponding model config from huggingface config
@@ -211,6 +250,23 @@ def main():
         elif noise_level.startswith("u"):
             uniform_noise = True
             noise_level = float(noise_level[1:])
+
+    # Stored in every case file: where, on what, and with which code/model snapshot it was made.
+    import transformers
+    provenance = dict(
+        host=socket.gethostname(),
+        gpu_name=torch.cuda.get_device_name(0),
+        torch_version=torch.__version__,
+        transformers_version=transformers.__version__,
+        cuda_version=str(torch.version.cuda),
+        dtype_source=str(torch_dtype_source),
+        dtype_target=str(torch_dtype_target),
+        noise_level=float(noise_level),
+        code_sha256=hashlib.sha256(open(os.path.abspath(__file__), "rb").read()).hexdigest(),
+        source_commit=str(getattr(mt_source.model.config, "_commit_hash", "") or ""),
+        target_commit=str(getattr(mt_target.model.config, "_commit_hash", "") or ""),
+    )
+    print(f"[provenance] {provenance}")
 
     run_log_path = "results/run_log.jsonl"
     os.makedirs("results", exist_ok=True)
@@ -317,6 +373,18 @@ def main():
                         cached_source_revision == (args.branch1 or "") and
                         cached_target_revision == (args.branch2 or "")):
                     numpy_result = cached_result
+                    # A resume must not mix hardware: high/low reproduce bit for bit on the same setup.
+                    cached_gpu = str(numpy.asarray(cached_result.get("gpu_name", "")).item())
+                    if cached_gpu and cached_gpu != provenance["gpu_name"]:
+                        raise RuntimeError(f"{filename} was written on {cached_gpu}, this run is on "
+                                           f"{provenance['gpu_name']}. Use a fresh --output_dir.")
+                    for key, now in (("high_score_signed", base_score_signed),
+                                     ("low_score_signed", low_score_signed)):
+                        if key in cached_result and float(cached_result[key]) != float(now):
+                            raise RuntimeError(
+                                f"{filename}: cached {key}={float(cached_result[key])!r} but this run "
+                                f"computes {float(now)!r}; it was produced on different hardware or "
+                                f"software. Use a fresh --output_dir.")
                 else:
                     raise RuntimeError(
                         f"Refusing to overwrite {filename}: it was produced under a different "
@@ -366,7 +434,8 @@ def main():
                     k: v.detach().to(torch.float32).cpu().numpy() if torch.is_tensor(v) else v
                     for k, v in result.items()
                 }
-                numpy.savez(filename, **numpy_result)
+                numpy_result.update(provenance)
+                save_npz_atomic(filename, numpy_result)
             plot_result = dict(numpy_result)
             plot_result["kind"] = kind
             pdfname = f'{pdf_dir}/{known_id}_{str("_".join(numpy_result["subject"])).strip()}_{kind_suffix}'

@@ -268,10 +268,10 @@ for run in "${RUNS[@]}"; do
   # because the generated directory name does not encode the revision.
   case "$kind" in
     self)  args=(--model_name="$src" --output_dir="$OUTPUT_TMPL")
-           outdir="results_v2/${src##*/}/ns3_r0_${src##*/}_${domain}/causal_trace" ;;
+           outdir="$RESULTS_ROOT/${src##*/}/ns3_r0_${src##*/}_${domain}/causal_trace" ;;
     cross) args=(--model_source="$src" --model_target="$tgt" --output_dir="$OUTPUT_TMPL")
-           outdir="results_v2/${src##*/}_to_${tgt##*/}/ns3_r0_${src##*/}_to_${tgt##*/}_${domain}/causal_trace" ;;
-    ckpt)  outdir="results_v2/checkpoints/${src##*/}/$branch/$domain/causal_trace"
+           outdir="$RESULTS_ROOT/${src##*/}_to_${tgt##*/}/ns3_r0_${src##*/}_to_${tgt##*/}_${domain}/causal_trace" ;;
+    ckpt)  outdir="$RESULTS_ROOT/checkpoints/${src##*/}/$branch/$domain/causal_trace"
            args=(--model_source="$src" --model_target="$src" --branch1="$branch" --branch2="$branch"
                  --output_dir="$outdir") ;;
   esac
@@ -289,7 +289,7 @@ for run in "${RUNS[@]}"; do
   fi
 
   started=$(date +%s)
-  echo "=== START $tag $domain $(date) (already done: $done_cases) ===" >> "$log"
+  echo "=== START $tag $domain $(date) (already done: $done_cases) host=$(hostname) gpu=$GPU:$gpu_name ===" >> "$log"
   if "$PYTHON" experiments/bias_trace.py "${args[@]}" \
        --bias_file="data/domain/$domain.json" >> "$log" 2>&1; then
     echo "=== DONE $tag $domain $(date) after $(( ($(date +%s) - started) / 60 )) min ===" >> "$log"

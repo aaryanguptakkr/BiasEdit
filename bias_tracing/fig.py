@@ -66,6 +66,7 @@ import json
 import zipfile
 import argparse
 import datetime
+import functools
 import math
 import numpy as np
 from tqdm import tqdm
@@ -75,7 +76,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from plot_utils import (
-    ZIP_PATH, MAIN_ZIP, PLOTS_BASE,
+    ZIP_PATH, MAIN_ZIP, PLOTS_BASE, USE_PKG_RESULTS, BASE_MODEL, plot_dir,
     MODEL_CONFIGS, BIAS_TYPES, PAPER_DOMAINS,
     CROSS_PATCH_BASE, CROSS_PATCH_CONFIGS, CROSS_PATCH_FAMILIES,
     cross_patch_cases_dir,
@@ -88,7 +89,7 @@ from plot_utils import (
     local_cases_dir, zip_cases_prefix, partition_names, subsample_aligned,
     load_npz_local, load_npz_zip,
     SCORE_METRIC, validate_score_files, collect_scores,
-    _draw_bars, _savepdf, normalized_indirect_effect, signed_gap_reliable,
+    _draw_bars, _savepdf, share_ylim, normalized_indirect_effect, signed_gap_reliable,
 )
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -150,6 +151,14 @@ domains_to_run     = [args.bias]      if args.bias       else BIAS_TYPES
 directions_to_run  = [args.direction] if args.direction  else list(CROSS_PATCH_CONFIGS.keys())
 cp_families_to_run = [args.cp_family] if args.cp_family  else list(CROSS_PATCH_FAMILIES.keys())
 
+def _out(legacy_dir, family, score, category):
+    """Output folder: new_plots/<family>/<score>/<category>/ in package mode, else the old one."""
+    if USE_PKG_RESULTS:
+        return plot_dir(family, score, category)
+    os.makedirs(legacy_dir, exist_ok=True)
+    return legacy_dir
+
+
 # ── data helpers ──────────────────────────────────────────────────────────────
 
 def save_individual(r1, r2, r3, labels, colors, num_layer, title, savepath):
@@ -176,6 +185,7 @@ def save_composite(domain_data, plot_type, model_name, ckpt_label, out_dir):
         r1, r2, r3, nl = domain_data[domain]
         _draw_bars(ax, r1, r2, r3, labels, BAR_COLORS, nl,
                    'Layer', Y_LABEL_BARS, domain.title())
+    share_ylim(axes)
     plt.tight_layout()
     _savepdf(fig, os.path.join(out_dir, f'composite-{plot_type}.pdf'))
 
@@ -198,6 +208,7 @@ def save_composite_all(states_data, words_data, model_name, ckpt_label, out_dir)
         r1, r2, r3, nl = words_data[domain]
         _draw_bars(axes[1, col], r1, r2, r3, WORDS_LABELS, BAR_COLORS, nl,
                    'Layer', Y_LABEL_BARS, f'{domain.title()} — words')
+    share_ylim(axes)
     plt.tight_layout()
     _savepdf(fig, os.path.join(out_dir, 'composite-all.pdf'))
 
@@ -789,6 +800,7 @@ def _finalize_result_dict(single_items, attn_items, mlp_items, loader, num_layer
     }
 
 
+@functools.lru_cache(maxsize=None)   # each figure reloads the same runs; read them once
 def load_cross_patch_domain(direction_key, domain, num_sample=None, family='olmo_1b'):
     """
     Load cross-patch .npz files for one (family, direction, domain) triple.
@@ -924,6 +936,7 @@ def save_cross_patch_direction(direction_key, domain_results, out_dir, family_la
                        'Layer', Y_LABEL_BARS, domain.title())
             ax.axhline(0, color='black', linewidth=0.8, linestyle='--', zorder=0)
             _low_sig_decorate(ax, res)
+        share_ylim(axes)
         plt.tight_layout()
         _savepdf(fig, os.path.join(out_dir, f'composite-{plot_type}.pdf'))
 
@@ -947,6 +960,7 @@ def save_cross_patch_direction(direction_key, domain_results, out_dir, family_la
         for row in range(2):
             axes[row, col].axhline(0, color='black', linewidth=0.8, linestyle='--', zorder=0)
             _low_sig_decorate(axes[row, col], res)
+    share_ylim(axes)
     plt.tight_layout()
     _savepdf(fig, os.path.join(out_dir, 'composite-all.pdf'))
 
@@ -1026,6 +1040,8 @@ def load_within_model_from_zip(zf, zip_names_all, model_name, org, checkpoint, d
     (model, checkpoint, domain) triple.  Returns a result dict in the same
     format as load_cross_patch_domain, or None on failure.
     """
+    if USE_PKG_RESULTS:
+        return load_within_model_from_local(model_name, org, checkpoint, domain, num_sample)
     prefix    = zip_cases_prefix(org, model_name, checkpoint, domain)
     all_names = [n for n in zip_names_all if n.startswith(prefix) and n.endswith('.npz')]
     if not all_names:
@@ -1066,6 +1082,7 @@ def load_within_model_from_zip(zf, zip_names_all, model_name, org, checkpoint, d
     return _finalize_result_dict(single_items, attn_items, mlp_items, loader, num_layer)
 
 
+@functools.lru_cache(maxsize=None)
 def load_within_model_from_local(model_name, org, checkpoint, domain, num_sample=None):
     """
     Load within-model causal tracing results from the local filesystem for one
@@ -1112,7 +1129,8 @@ def load_within_model_from_local(model_name, org, checkpoint, domain, num_sample
 
 def save_cross_patch_4panel(within_model_panels, all_direction_results, domains, out_dir,
                             inst_label='OLMo Instruct\n(step2600)', file_prefix='4panel',
-                            extra_out_dir=None):
+                            base_label='OLMo-2-0425-1B\n(pre)',
+                            extra_out_dir=None, within_out_dir=None):
     """
     4-panel comparison per domain (and composite over all domains):
 
@@ -1137,7 +1155,7 @@ def save_cross_patch_4panel(within_model_panels, all_direction_results, domains,
       {file_prefix}-composite-words.pdf
     """
     PANEL_DEFS = [
-        ('base_last',    'OLMo-2-0425-1B\n(pre)',  'within'),
+        ('base_last',    base_label,               'within'),
         ('inst_last',  inst_label,               'within'),
         ('pre_to_post', 'Pre → Post',             'cross'),
         ('post_to_pre', 'Post → Pre',             'cross'),
@@ -1260,7 +1278,7 @@ def save_cross_patch_4panel(within_model_panels, all_direction_results, domains,
                 PANEL_DEFS[:2], panels_data[:2],
                 f'{dom} bias — within-model: Stage 2 vs Instruct ({plot_type})\n'
                 'Y-axis fixed across panels',
-                os.path.join(out_dir, f'{file_prefix}-{domain}-{plot_type}-within.pdf'))
+                os.path.join(within_out_dir or out_dir, f'{file_prefix}-{domain}-{plot_type}-within.pdf'))
 
             # Layout 3: cross-patch — Pre→Post vs Post→Pre
             _draw_2panel(
@@ -1302,6 +1320,8 @@ def _load_from_main_zip(main_zf, domain, num_sample=None):
     Path structure in zip: main/{domain}/causal_trace/cases/
     Returns a result dict in the same format as load_cross_patch_domain, or None.
     """
+    if USE_PKG_RESULTS:
+        return load_within_model_from_local(BASE_MODEL, 'allenai', 'main', domain, num_sample)
     prefix = f'main/{domain}/causal_trace/cases/'
     names  = [n for n in main_zf.namelist() if n.startswith(prefix) and n.endswith('.npz')]
     if not names:
@@ -1335,6 +1355,33 @@ def _load_from_main_zip(main_zf, domain, num_sample=None):
         print(f'    [main.zip] Cannot read sample: {ex}')
         return None
     return _finalize_result_dict(single_items, attn_items, mlp_items, loader, num_layer)
+
+
+def _load_family_pair(family, domains, num_sample=None, main_zf=None):
+    """Within-model base and instruct results for one CROSS_PATCH_FAMILIES entry."""
+    fam = CROSS_PATCH_FAMILIES[family]
+    (b_org, b_name), (i_org, i_name) = (fam[k].split('/') for k in ('base_model', 'instruct_model'))
+    if family == 'olmo_1b':
+        own = main_zf is None and not USE_PKG_RESULTS
+        if own:
+            main_zf = zipfile.ZipFile(MAIN_ZIP, 'r')
+        base = {d: _load_from_main_zip(main_zf, d, num_sample) for d in domains}
+        if own:
+            main_zf.close()
+        inst_ckpt = 'step_2000'
+    else:
+        base = {d: load_within_model_from_local(b_name, b_org, 'main', d, num_sample) for d in domains}
+        inst_ckpt = 'main'
+    inst = {d: load_within_model_from_local(i_name, i_org, inst_ckpt, d, num_sample) for d in domains}
+    return base, inst, b_name, i_name
+
+
+def _n_layers(*results):
+    return max((r['num_layer'] for r in results if r), default=16)
+
+
+def _layer_ticks(n):
+    return np.arange(0, n, max(1, n // 8))
 
 
 # ── appendix grid helpers ─────────────────────────────────────────────────────
@@ -1426,7 +1473,7 @@ def _states_words_legend(fig, bottom_frac=0.10):
 
 # ── appendix A1: OLMo base + instruct bars (4×3) ─────────────────────────────
 
-def save_appendix_A1_olmo_bars(out_dir, num_sample=None, main_zf=None):
+def save_appendix_A1_olmo_bars(out_dir, num_sample=None, main_zf=None, family='olmo_1b'):
     """
     Appendix A1: 4×3 grid for OLMo-2-0425-1B (main) and OLMo-2-0425-1B-Instruct (step_2000).
     Row 0 base states · Row 1 base words · Row 2 instruct states · Row 3 instruct words.
@@ -1434,24 +1481,15 @@ def save_appendix_A1_olmo_bars(out_dir, num_sample=None, main_zf=None):
     States bars use STATES_COLORS; words bars use WORDS_COLORS.
     Single global Y-axis across all 12 panels.
     """
-    print('  [A1] Loading OLMo base from main.zip...')
-    _own_zf = main_zf is None
-    if _own_zf:
-        main_zf = zipfile.ZipFile(MAIN_ZIP, 'r')
-    base_results = {d: _load_from_main_zip(main_zf, d, num_sample) for d in PAPER_DOMAINS}
-    if _own_zf:
-        main_zf.close()
-
-    print('  [A1] Loading OLMo instruct from local (step_2000)...')
-    inst_results = {d: load_within_model_from_local(
-        'OLMo-2-0425-1B-Instruct', 'allenai', 'step_2000', d, num_sample)
-        for d in PAPER_DOMAINS}
+    print(f'  [A1] Loading {family} base + instruct...')
+    base_results, inst_results, b_name, i_name = _load_family_pair(
+        family, PAPER_DOMAINS, num_sample, main_zf)
 
     row_specs = [
-        (base_results, 'states', STATES_COLORS, 'OLMo-2-0425-1B',          'effect of states'),
-        (base_results, 'words',  WORDS_COLORS,  'OLMo-2-0425-1B',          'effect of different words'),
-        (inst_results, 'states', STATES_COLORS, 'OLMo-2-0425-1B-Instruct', 'effect of states'),
-        (inst_results, 'words',  WORDS_COLORS,  'OLMo-2-0425-1B-Instruct', 'effect of different words'),
+        (base_results, 'states', STATES_COLORS, b_name, 'effect of states'),
+        (base_results, 'words',  WORDS_COLORS,  b_name, 'effect of different words'),
+        (inst_results, 'states', STATES_COLORS, i_name, 'effect of states'),
+        (inst_results, 'words',  WORDS_COLORS,  i_name, 'effect of different words'),
     ]
     row_ylims = [
         _row_ylim(base_results, PAPER_DOMAINS, 'bias_mean', 'mlp_mean', 'attn_mean'),
@@ -1462,9 +1500,11 @@ def save_appendix_A1_olmo_bars(out_dir, num_sample=None, main_zf=None):
 
     fig, axes = plt.subplots(4, 3, figsize=(FIG_BAR_W_PER_COL * 3, FIG_ROW_H * 4))
     _bars_grid(axes, row_specs, PAPER_DOMAINS, row_ylims)
+    share_ylim(axes)
     _states_words_legend(fig)
     fig.tight_layout(rect=[0, 0.07, 1, 1.0])
-    _savepdf(fig, os.path.join(out_dir, 'A1-olmo-bars.pdf'))
+    _savepdf(fig, os.path.join(out_dir, 'A1-olmo-bars.pdf' if family == 'olmo_1b'
+                               else f'A1-bars-{family}.pdf'))
 
 
 # ── appendix A2: Pythia bars (2×3) ───────────────────────────────────────────
@@ -1496,6 +1536,7 @@ def save_appendix_A2_pythia_bars(out_dir, num_sample=None):
 
     fig, axes = plt.subplots(2, 3, figsize=(FIG_BAR_W_PER_COL * 3, FIG_ROW_H * 2))
     _bars_grid(axes, row_specs, PAPER_DOMAINS, row_ylims)
+    share_ylim(axes)
     _states_words_legend(fig)
     fig.tight_layout(rect=[0, 0.11, 1, 1.0])
     _savepdf(fig, os.path.join(out_dir, 'A2-pythia-bars.pdf'))
@@ -1503,7 +1544,7 @@ def save_appendix_A2_pythia_bars(out_dir, num_sample=None):
 
 # ── appendix A3: NIE line plots (4×3) ────────────────────────────────────────
 
-def save_appendix_A3_nie_lines(out_dir, num_sample=None, main_zf=None):
+def save_appendix_A3_nie_lines(out_dir, num_sample=None, main_zf=None, family='olmo_1b'):
     """
     Appendix A3: 4×3 NIE layer-profile figure.
     Row 0: OLMo base (solid) vs OLMo Instruct (dashed) — states NIE — 3 domains.
@@ -1521,23 +1562,16 @@ def save_appendix_A3_nie_lines(out_dir, num_sample=None, main_zf=None):
     A3_FS_TICK   = FS_TICK   + 4   # 12
     A3_FS_LEGEND = FS_LEGEND + 6   # 13
 
-    print('  [A3] Loading OLMo base from main.zip...')
-    _own_zf = main_zf is None
-    if _own_zf:
-        main_zf = zipfile.ZipFile(MAIN_ZIP, 'r')
-    base_results = {d: _load_from_main_zip(main_zf, d, num_sample) for d in PAPER_DOMAINS}
-    if _own_zf:
-        main_zf.close()
+    print(f'  [A3] Loading {family} base + instruct...')
+    base_results, inst_results, b_name, i_name = _load_family_pair(
+        family, PAPER_DOMAINS, num_sample, main_zf)
 
-    print('  [A3] Loading OLMo instruct from local (step_2000)...')
-    inst_results = {d: load_within_model_from_local(
-        'OLMo-2-0425-1B-Instruct', 'allenai', 'step_2000', d, num_sample)
-        for d in PAPER_DOMAINS}
-
-    print('  [A3] Loading Pythia (step143000) from results.zip...')
-    pythia_results = {d: load_within_model_from_zip(
-        zf, zip_names_all, 'pythia-1b', 'EleutherAI', 'step143000', d, num_sample)
-        for d in PAPER_DOMAINS}
+    pythia_results = {}
+    if family == 'olmo_1b':   # the OLMo-vs-Pythia rows exist only for OLMo
+        print('  [A3] Loading Pythia (step143000)...')
+        pythia_results = {d: load_within_model_from_zip(
+            zf, zip_names_all, 'pythia-1b', 'EleutherAI', 'step143000', d, num_sample)
+            for d in PAPER_DOMAINS}
 
     STATES_KEYS   = ('bias', 'mlp', 'attn')
     STATES_LABELS_SHORT = ['States', 'MLP window', 'Attn window']
@@ -1596,18 +1630,19 @@ def save_appendix_A3_nie_lines(out_dir, num_sample=None, main_zf=None):
 
     # 4 rows: (plot_type, model1_results, label1, model2_results, label2)
     ROW_DEFS = [
-        ('states', base_results, 'OLMo-2-0425-1B (solid)',
-                   inst_results,    'OLMo-2-0425-1B-Instruct (dashed)'),
-        ('words',  base_results, 'OLMo-2-0425-1B (solid)',
-                   inst_results,    'OLMo-2-0425-1B-Instruct (dashed)'),
-        ('states', base_results, 'OLMo-2-0425-1B (solid)',
-                   pythia_results,  'Pythia-1B (dashed)'),
-        ('words',  base_results, 'OLMo-2-0425-1B (solid)',
-                   pythia_results,  'Pythia-1B (dashed)'),
+        ('states', base_results, f'{b_name} (solid)', inst_results, f'{i_name} (dashed)'),
+        ('words',  base_results, f'{b_name} (solid)', inst_results, f'{i_name} (dashed)'),
     ]
+    if pythia_results:
+        ROW_DEFS += [
+            ('states', base_results, f'{b_name} (solid)', pythia_results, 'Pythia-1B (dashed)'),
+            ('words',  base_results, f'{b_name} (solid)', pythia_results, 'Pythia-1B (dashed)'),
+        ]
     letters_all = list('abcdefghijkl')
+    n_rows = len(ROW_DEFS)
+    n_lay = _n_layers(*base_results.values(), *inst_results.values())
 
-    fig, axes = plt.subplots(4, 3, figsize=(FIG_LINE_W_PER_PAN * 3, (FIG_ROW_H + 0.5) * 4))
+    fig, axes = plt.subplots(n_rows, 3, figsize=(FIG_LINE_W_PER_PAN * 3, (FIG_ROW_H + 0.5) * n_rows))
     letter_idx = 0
 
     for row, (plot_type, model1_results, model1_label, model2_results, model2_label) in enumerate(ROW_DEFS):
@@ -1648,7 +1683,7 @@ def save_appendix_A3_nie_lines(out_dir, num_sample=None, main_zf=None):
             if col == 0:
                 ax.set_ylabel(Y_LABEL_NIE, fontsize=A3_FS_LABEL)
             ax.set_ylim(ymin, ymax)
-            ax.set_xticks(np.arange(0, 16, max(1, 16 // 8)))
+            ax.set_xticks(_layer_ticks(n_lay))
             ax.tick_params(labelsize=A3_FS_TICK)
             ax.grid(alpha=0.2)
 
@@ -1676,13 +1711,15 @@ def save_appendix_A3_nie_lines(out_dir, num_sample=None, main_zf=None):
     fig.legend(handles=legend_handles, loc='lower center', bbox_to_anchor=(0.5, 0.0),
                ncol=4, fontsize=A3_FS_LEGEND, frameon=True,
                labelspacing=1.0, handlelength=3.0, handletextpad=0.8, columnspacing=2.5)
-    fig.tight_layout(rect=[0, 0.10, 1, 1.0])
-    _savepdf(fig, os.path.join(out_dir, 'A3-nie-lines.pdf'))
+    share_ylim(axes)
+    fig.tight_layout(rect=[0, 0.10 * 4 / n_rows, 1, 1.0])
+    _savepdf(fig, os.path.join(out_dir, 'A3-nie-lines.pdf' if family == 'olmo_1b'
+                               else f'A3-nie-lines-{family}.pdf'))
 
 
 # ── main body: NIE overlay (gender, single panel) ────────────────────────────
 
-def save_main_body_nie_overlay(out_dir, num_sample=None, main_zf=None):
+def save_main_body_nie_overlay(out_dir, num_sample=None, main_zf=None, family='olmo_1b'):
     """
     Main body figure: single NIE panel for gender domain.
     OLMo-2-0425-1B (solid) vs OLMo-2-0425-1B-Instruct (dashed).
@@ -1691,17 +1728,10 @@ def save_main_body_nie_overlay(out_dir, num_sample=None, main_zf=None):
     """
     from matplotlib.lines import Line2D
 
-    print('  [NIE overlay] Loading OLMo base from main.zip...')
-    _own_zf = main_zf is None
-    if _own_zf:
-        main_zf = zipfile.ZipFile(MAIN_ZIP, 'r')
-    base_res = _load_from_main_zip(main_zf, 'gender', num_sample)
-    if _own_zf:
-        main_zf.close()
-
-    print('  [NIE overlay] Loading OLMo instruct (step_2000)...')
-    inst_res = load_within_model_from_local(
-        'OLMo-2-0425-1B-Instruct', 'allenai', 'step_2000', 'gender', num_sample)
+    print(f'  [NIE overlay] Loading {family} base + instruct...')
+    _b, _i, b_name, i_name = _load_family_pair(family, ['gender'], num_sample, main_zf)
+    base_res, inst_res = _b['gender'], _i['gender']
+    n_lay = _n_layers(base_res, inst_res)
 
     SCORE_KEYS = ('states_score', 'mlp_score', 'attn_score')
     NIE_LABELS = ['States', 'MLP window', 'Attn window']
@@ -1740,7 +1770,7 @@ def save_main_body_nie_overlay(out_dir, num_sample=None, main_zf=None):
         color = BAR_COLORS[ki]
         nie_b = _nie(base_res, key)
         nie_i = _nie(inst_res, key)
-        xs    = np.arange(16)
+        xs    = np.arange(n_lay)
         if nie_b is not None:
             ax.plot(xs, nie_b, color=color, linewidth=2.0, linestyle='-',
                     marker='o', markersize=3)
@@ -1749,12 +1779,12 @@ def save_main_body_nie_overlay(out_dir, num_sample=None, main_zf=None):
                     marker='s', markersize=3)
 
     ax.axhline(0, color='black', linewidth=0.7, alpha=0.4)
-    ax.set_title('(a) Gender\nOLMo-2-0425-1B (solid) vs OLMo-2-0425-1B-Instruct (dashed)',
+    ax.set_title(f'(a) Gender\n{b_name} (solid) vs {i_name} (dashed)',
                  fontsize=FS_TITLE+3)
     ax.set_xlabel('Layer', fontsize=FS_LABEL+5)
     ax.set_ylabel('NIE (normalized indirect effect)', fontsize=FS_LABEL+5)
     ax.set_ylim(y_min, y_max)
-    ax.set_xticks(np.arange(0, 16, 2))
+    ax.set_xticks(_layer_ticks(n_lay))
     ax.tick_params(labelsize=FS_TICK+4)
     ax.grid(alpha=0.2)
 
@@ -1771,10 +1801,11 @@ def save_main_body_nie_overlay(out_dir, num_sample=None, main_zf=None):
                ncol=2, fontsize=FS_LEGEND + 5, frameon=True,
                labelspacing=0.4, handlelength=1.8, handletextpad=0.4, columnspacing=0.8)
     fig.tight_layout(rect=[0, 0.17, 1, 1.0])
-    _savepdf(fig, os.path.join(out_dir, 'nie-overlay-gender.pdf'))
+    _savepdf(fig, os.path.join(out_dir, 'nie-overlay-gender.pdf' if family == 'olmo_1b'
+                               else f'nie-overlay-gender-{family}.pdf'))
 
 
-def save_main_body_pre_post_crosspatch(out_dir, num_sample=None, main_zf=None):
+def save_main_body_pre_post_crosspatch(out_dir, num_sample=None, main_zf=None, family='olmo_1b'):
     """
     Main-body 2-panel gender figure (1×2, shared y-axis, no suptitle).
 
@@ -1800,19 +1831,12 @@ def save_main_body_pre_post_crosspatch(out_dir, num_sample=None, main_zf=None):
 
     DOMAIN = 'gender'
 
-    print('  [pre-post-cp] Loading Pre (base, main.zip)...')
-    _own_zf = main_zf is None
-    if _own_zf:
-        main_zf = zipfile.ZipFile(MAIN_ZIP, 'r')
-    pre_res = _load_from_main_zip(main_zf, DOMAIN, num_sample)
-    if _own_zf:
-        main_zf.close()
-
-    print('  [pre-post-cp] Loading Post (instruct step_2000) + cross-patch...')
-    post_res   = load_within_model_from_local(
-        'OLMo-2-0425-1B-Instruct', 'allenai', 'step_2000', DOMAIN, num_sample)
-    p2post_res = load_cross_patch_domain('pre_to_post', DOMAIN, num_sample)
-    p2pre_res  = load_cross_patch_domain('post_to_pre', DOMAIN, num_sample)
+    print(f'  [pre-post-cp] Loading {family} Pre, Post + cross-patch...')
+    _b, _i, b_name, i_name = _load_family_pair(family, [DOMAIN], num_sample, main_zf)
+    pre_res, post_res = _b[DOMAIN], _i[DOMAIN]
+    p2post_res = load_cross_patch_domain('pre_to_post', DOMAIN, num_sample, family=family)
+    p2pre_res  = load_cross_patch_domain('post_to_pre', DOMAIN, num_sample, family=family)
+    n_lay = _n_layers(pre_res, post_res, p2post_res, p2pre_res)
 
     def _nie(res, key):
         """Signed-chain NIE, same definition as everywhere else. None if res, the
@@ -1869,10 +1893,10 @@ def save_main_body_pre_post_crosspatch(out_dir, num_sample=None, main_zf=None):
             ax_a.plot(np.arange(len(nie_post)), nie_post, color=color, linewidth=2.0,
                       linestyle='--', marker='s', markersize=3)
     ax_a.axhline(0, color='black', linewidth=0.7, alpha=0.4)
-    ax_a.set_title('(a) Gender — OLMo-2-0425-1B (Pre) solid vs\n'
-                   'OLMo-2-0425-1B-Instruct (Post) dashed', fontsize=FS_T)
+    ax_a.set_title(f'(a) Gender — {b_name} (Pre) solid vs\n'
+                   f'{i_name} (Post) dashed', fontsize=FS_T)
     ax_a.set_xlabel('Layer', fontsize=FS_L)
-    ax_a.set_xticks(np.arange(0, 16, 2))
+    ax_a.set_xticks(_layer_ticks(n_lay))
     ax_a.tick_params(labelsize=FS_K)
     ax_a.grid(alpha=0.2)
     handles_a = []
@@ -1899,7 +1923,7 @@ def save_main_body_pre_post_crosspatch(out_dir, num_sample=None, main_zf=None):
     ax_b.set_title('(b) Gender — Pre, Post, Pre→Post, Post→Pre\n(States NIE)',
                    fontsize=FS_T)
     ax_b.set_xlabel('Layer', fontsize=FS_L)
-    ax_b.set_xticks(np.arange(0, 16, 2))
+    ax_b.set_xticks(_layer_ticks(n_lay))
     ax_b.tick_params(labelsize=FS_K, labelleft=True)   # keep y-ticks despite sharey
     ax_b.grid(alpha=0.2)
     ax_b.legend(handles=handles_b, fontsize=FS_G, frameon=True, ncol=2,
@@ -1910,12 +1934,13 @@ def save_main_body_pre_post_crosspatch(out_dir, num_sample=None, main_zf=None):
     fig.supylabel(Y_LABEL_NIE, fontsize=FS_L)
     fig.tight_layout()
     fig.subplots_adjust(wspace=0.1)   # tighten gap between the two panels
-    _savepdf(fig, os.path.join(out_dir, 'pre-post-crosspatch-gender.pdf'))
+    _savepdf(fig, os.path.join(out_dir, 'pre-post-crosspatch-gender.pdf' if family == 'olmo_1b'
+                               else f'pre-post-crosspatch-gender-{family}.pdf'))
 
 
 # ── appendix A7: cross-patch NIE overlay (within-model vs cross-patch) ────────
 
-def save_crosspatch_nie_overlay(out_dir, num_sample=None, main_zf=None):
+def save_crosspatch_nie_overlay(out_dir, num_sample=None, main_zf=None, family='olmo_1b'):
     """
     4×3 NIE layer-profile overlay for cross-model patching.
     Solid = within-model recipient; dashed = cross-patch into that recipient.
@@ -1938,22 +1963,14 @@ def save_crosspatch_nie_overlay(out_dir, num_sample=None, main_zf=None):
     A7_FS_TICK   = FS_TICK + 4
     A7_FS_LEGEND = FS_LEGEND + 6
 
-    print('  [A7] Loading OLMo base (pre) from main.zip...')
-    _own_zf = main_zf is None
-    if _own_zf:
-        main_zf = zipfile.ZipFile(MAIN_ZIP, 'r')
-    pre_results = {d: _load_from_main_zip(main_zf, d, num_sample) for d in PAPER_DOMAINS}
-    if _own_zf:
-        main_zf.close()
-
-    print('  [A7] Loading OLMo instruct (post, step_2000) from local...')
-    post_results = {d: load_within_model_from_local(
-        'OLMo-2-0425-1B-Instruct', 'allenai', 'step_2000', d, num_sample)
-        for d in PAPER_DOMAINS}
-
-    print('  [A7] Loading cross-patch directions (pre→post, post→pre)...')
-    p2post_results = {d: load_cross_patch_domain('pre_to_post', d, num_sample) for d in PAPER_DOMAINS}
-    p2pre_results  = {d: load_cross_patch_domain('post_to_pre', d, num_sample) for d in PAPER_DOMAINS}
+    print(f'  [A7] Loading {family} Pre, Post + cross-patch...')
+    pre_results, post_results, b_name, i_name = _load_family_pair(
+        family, PAPER_DOMAINS, num_sample, main_zf)
+    p2post_results = {d: load_cross_patch_domain('pre_to_post', d, num_sample, family=family)
+                      for d in PAPER_DOMAINS}
+    p2pre_results  = {d: load_cross_patch_domain('post_to_pre', d, num_sample, family=family)
+                      for d in PAPER_DOMAINS}
+    n_lay = _n_layers(*pre_results.values(), *post_results.values())
 
     STATES_KEYS = ('bias', 'mlp', 'attn')
     STATES_LABELS_SHORT = ['States', 'MLP window', 'Attn window']
@@ -2048,7 +2065,7 @@ def save_crosspatch_nie_overlay(out_dir, num_sample=None, main_zf=None):
             if col == 0:
                 ax.set_ylabel(Y_LABEL_NIE, fontsize=A7_FS_LABEL)
             ax.set_ylim(ymin, ymax)
-            ax.set_xticks(np.arange(0, 16, max(1, 16 // 8)))
+            ax.set_xticks(_layer_ticks(n_lay))
             ax.tick_params(labelsize=A7_FS_TICK)
             ax.grid(alpha=0.2)
 
@@ -2074,8 +2091,10 @@ def save_crosspatch_nie_overlay(out_dir, num_sample=None, main_zf=None):
     fig.legend(handles=legend_handles, loc='lower center', bbox_to_anchor=(0.5, 0.0),
                ncol=4, fontsize=A7_FS_LEGEND, frameon=True,
                labelspacing=1.0, handlelength=3.0, handletextpad=0.8, columnspacing=2.5)
+    share_ylim(axes)
     fig.tight_layout(rect=[0, 0.10, 1, 1.0])
-    _savepdf(fig, os.path.join(out_dir, 'A7-crosspatch-nie-overlay.pdf'))
+    _savepdf(fig, os.path.join(out_dir, 'A7-crosspatch-nie-overlay.pdf' if family == 'olmo_1b'
+                               else f'A7-crosspatch-nie-overlay-{family}.pdf'))
 
 
 # ── appendix A4: cross-patch bars (4×3) ──────────────────────────────────────
@@ -2112,6 +2131,7 @@ def save_appendix_A4_cross_patch_bars(all_direction_results, out_dir,
 
     fig, axes = plt.subplots(4, 3, figsize=(FIG_BAR_W_PER_COL * 3, FIG_ROW_H * 4))
     _bars_grid(axes, row_specs, PAPER_DOMAINS, row_ylims)
+    share_ylim(axes)
     _states_words_legend(fig)
     fig.tight_layout(rect=[0, 0.07, 1, 1.0])
     _savepdf(fig, os.path.join(out_dir, out_name))
@@ -2399,9 +2419,12 @@ for model_name in (models_to_run if RUN_BARS or RUN_DELTA or RUN_COMPARE else []
             zip_prefix = zip_cases_prefix(org, model_name, checkpoint, domain)
             zip_has_data = any(n.startswith(zip_prefix) and n.endswith('.npz')
                                for n in zip_names_all)
-            use_local  = (args.source == 'local') or \
+            use_local  = (args.source == 'local') or USE_PKG_RESULTS or \
                          (args.source == 'auto' and os.path.isdir(local_dir)
                           and not zip_has_data)
+            if use_local and not os.path.isdir(local_dir):
+                print(f'    No local data: {local_dir}; skipping.')
+                continue
 
             if use_local:
                 all_local    = sorted(os.listdir(local_dir))
@@ -2584,9 +2607,10 @@ if RUN_COMPARE and BASE in all_models_stats and INSTRUCT in all_models_stats:
 if RUN_CROSS_PATCH:
     print('\n=== Cross-patch plots ===')
     cross_patch_out = os.path.join(PLOTS_BASE, 'cross_patch')
-    os.makedirs(cross_patch_out, exist_ok=True)
+    USE_PKG_RESULTS or os.makedirs(cross_patch_out, exist_ok=True)
 
     all_direction_results = {}  # olmo_1b results — {direction_key: {domain: result_dict}}
+    fam_results_all = {}        # {family: {direction_key: {domain: result_dict}}}
 
     for cp_family in cp_families_to_run:
         fam_label = CROSS_PATCH_FAMILIES[cp_family]['label']
@@ -2603,8 +2627,8 @@ if RUN_CROSS_PATCH:
             cfg_cp = CROSS_PATCH_CONFIGS[direction_key]
             print(f'\n  Direction: {cfg_cp["label"]}  ({cfg_cp["desc"]})')
 
-            dir_out = os.path.join(fam_out, direction_key)
-            os.makedirs(dir_out, exist_ok=True)
+            dir_out = _out(os.path.join(fam_out, direction_key), cp_family, 'ALP',
+                           'prepost' if direction_key == 'pre_to_post' else 'postpre')
 
             domain_results = {}
             for domain in domains_to_run:
@@ -2622,35 +2646,33 @@ if RUN_CROSS_PATCH:
         # comparison plot — requires both directions to have results
         if len(fam_direction_results) >= 2:
             print('\n  Generating direction-comparison plots...')
-            save_cross_patch_comparison(fam_direction_results, domains_to_run, fam_out,
+            save_cross_patch_comparison(fam_direction_results, domains_to_run,
+                                        _out(fam_out, cp_family, 'ALP', 'cross'),
                                         family_label=title_label)
         elif len(fam_direction_results) == 1:
             print('\n  Only one direction has data — skipping comparison plots.')
 
         if is_olmo:
             all_direction_results = fam_direction_results
+        fam_results_all[cp_family] = fam_direction_results
 
     # 4-panel comparison: within-model last checkpoints + both cross-patch directions
     # Base: OLMo-2-0425-1B main checkpoint (from main.zip)
     # Instruct: OLMo-2-0425-1B-Instruct step_2000 main checkpoint (from local NFS)
-    if all_direction_results:
-        print('\n  Loading within-model main checkpoints for 4-panel plots...')
-        within_model_panels = {}
-        _main_zf4 = zipfile.ZipFile(MAIN_ZIP, 'r')
-        for domain in domains_to_run:
-            print(f'  {domain}')
-            base_res = _load_from_main_zip(_main_zf4, domain, args.num_sample)
-            inst_res = load_within_model_from_local(
-                INSTRUCT, 'allenai', 'step_2000', domain, args.num_sample)
-            within_model_panels[domain] = {'base_last': base_res, 'inst_last': inst_res}
-        _main_zf4.close()
-        print('\n  Generating 4-panel plots (main / step2000)...')
-        _main_body_out = os.path.join(PLOTS_BASE, 'main_body')
-        save_cross_patch_4panel(within_model_panels, all_direction_results,
-                                domains_to_run, cross_patch_out,
-                                inst_label='OLMo-2-0425-1B-Instruct\n(post)',
-                                file_prefix='4panel-step2000',
-                                extra_out_dir=_main_body_out)
+    for cp_family, fam_dir_results in fam_results_all.items():
+        if not fam_dir_results:
+            continue
+        is_olmo = cp_family == 'olmo_1b'
+        print(f'\n  Loading within-model base + instruct for 4-panel plots ({cp_family})...')
+        _b, _i, b_name, i_name = _load_family_pair(cp_family, domains_to_run, args.num_sample)
+        within_model_panels = {d: {'base_last': _b[d], 'inst_last': _i[d]} for d in domains_to_run}
+        legacy = cross_patch_out if is_olmo else os.path.join(cross_patch_out, cp_family)
+        save_cross_patch_4panel(within_model_panels, fam_dir_results, domains_to_run,
+                                _out(legacy, cp_family, 'ALP', 'cross'),
+                                inst_label=f'{i_name}\n(post)', base_label=f'{b_name}\n(pre)',
+                                file_prefix='4panel-step2000' if is_olmo else f'4panel-{cp_family}',
+                                extra_out_dir=None if USE_PKG_RESULTS else os.path.join(PLOTS_BASE, 'main_body'),
+                                within_out_dir=_out(legacy, cp_family, 'ALP', 'within'))
 
 # ── NPZ-based checkpoint loader (bypasses stats.json) ────────────────────────
 
@@ -2704,23 +2726,27 @@ def _load_checkpoints_from_npz(model_name, num_sample=None):
 if RUN_APPENDIX:
     print('\n=== Appendix figures ===')
     appendix_out = os.path.join(PLOTS_BASE, 'appendix')
-    os.makedirs(appendix_out, exist_ok=True)
+    USE_PKG_RESULTS or os.makedirs(appendix_out, exist_ok=True)
 
     _app_main_zf = zipfile.ZipFile(MAIN_ZIP, 'r')
 
-    print('\n  A1: OLMo base + instruct bar charts (4×3)...')
-    save_appendix_A1_olmo_bars(appendix_out, args.num_sample, main_zf=_app_main_zf)
+    for _fam in cp_families_to_run:
+        print(f'\n  A1: {_fam} base + instruct bar charts (4×3)...')
+        save_appendix_A1_olmo_bars(_out(appendix_out, _fam, 'ALP', 'within'), args.num_sample,
+                                   main_zf=_app_main_zf, family=_fam)
 
     print('\n  A2: Pythia bar charts (2×3)...')
-    save_appendix_A2_pythia_bars(appendix_out, args.num_sample)
+    save_appendix_A2_pythia_bars(_out(appendix_out, 'pythia', 'ALP', 'within'), args.num_sample)
 
-    print('\n  A3: NIE line plots (2×3)...')
-    save_appendix_A3_nie_lines(appendix_out, args.num_sample, main_zf=_app_main_zf)
-
-    print('\n  NIE overlay (main body, gender only)...')
     main_body_out = os.path.join(PLOTS_BASE, 'main_body')
-    os.makedirs(main_body_out, exist_ok=True)
-    save_main_body_nie_overlay(main_body_out, args.num_sample, main_zf=_app_main_zf)
+    USE_PKG_RESULTS or os.makedirs(main_body_out, exist_ok=True)
+    for _fam in cp_families_to_run:
+        print(f'\n  A3: {_fam} NIE line plots...')
+        save_appendix_A3_nie_lines(_out(appendix_out, _fam, 'NIE', 'within'), args.num_sample,
+                                   main_zf=_app_main_zf, family=_fam)
+        print(f'\n  NIE overlay ({_fam}, gender only)...')
+        save_main_body_nie_overlay(_out(main_body_out, _fam, 'NIE', 'within'), args.num_sample,
+                                   main_zf=_app_main_zf, family=_fam)
 
     _app_main_zf.close()
 
@@ -2741,19 +2767,24 @@ if RUN_APPENDIX:
                     _dr[_dom] = _res
             if _dr:
                 _app_cp[_dk] = _dr
-        save_appendix_A4_cross_patch_bars(_app_cp, appendix_out, out_name=_fname)
+        save_appendix_A4_cross_patch_bars(_app_cp, _out(appendix_out, _fam, 'ALP', 'cross'), out_name=_fname)
 
     print('\n  A5: Trajectory plots (1×3)...')
     _base_traj     = _load_checkpoints_from_npz('OLMo-2-0425-1B',          args.num_sample)
     _instruct_traj = _load_checkpoints_from_npz('OLMo-2-0425-1B-Instruct', args.num_sample)
+    _all_ckpts = lambda t: t and all(set(PAPER_DOMAINS) <= set(e['domains']) for e in t)
+    if not (_all_ckpts(_base_traj) and _all_ckpts(_instruct_traj)):
+        print('  [A5/A6] Some checkpoints are not finished yet; skipping both.')
+        _base_traj = _instruct_traj = None
     if _base_traj and _instruct_traj:
-        save_appendix_A5_trajectory(_base_traj, _instruct_traj, appendix_out)
+        save_appendix_A5_trajectory(_base_traj, _instruct_traj, _out(appendix_out, 'olmo_1b', 'ALP', 'trajectory'))
     else:
         print('  [A5] Skipping.')
 
     print('\n  A6: NIE heatmap — layer × checkpoint (3 conditions × 3 domains)...')
     if _base_traj and _instruct_traj:
-        save_appendix_A6_heatmap(_base_traj, _instruct_traj, appendix_out, args.num_sample)
+        save_appendix_A6_heatmap(_base_traj, _instruct_traj, _out(appendix_out, 'olmo_1b', 'NIE', 'trajectory'),
+                                 args.num_sample)
     else:
         print('  [A6] Skipping.')
 
@@ -2761,12 +2792,12 @@ if RUN_APPENDIX:
 if RUN_CP_NIE:
     print('\n=== Cross-patch NIE overlay (within-model vs cross-patch) ===')
     cp_nie_out = os.path.join(PLOTS_BASE, 'appendix')
-    os.makedirs(cp_nie_out, exist_ok=True)
-    save_crosspatch_nie_overlay(cp_nie_out, args.num_sample)
-
+    USE_PKG_RESULTS or os.makedirs(cp_nie_out, exist_ok=True)
     cp_mb_out = os.path.join(PLOTS_BASE, 'main_body')
-    os.makedirs(cp_mb_out, exist_ok=True)
-    save_main_body_pre_post_crosspatch(cp_mb_out, args.num_sample)
+    USE_PKG_RESULTS or os.makedirs(cp_mb_out, exist_ok=True)
+    for _fam in cp_families_to_run:
+        save_crosspatch_nie_overlay(_out(cp_nie_out, _fam, 'NIE', 'cross'), args.num_sample, family=_fam)
+        save_main_body_pre_post_crosspatch(_out(cp_mb_out, _fam, 'NIE', 'cross'), args.num_sample, family=_fam)
 
 zf.close()
 print('\nDone.')

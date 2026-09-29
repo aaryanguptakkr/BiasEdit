@@ -41,6 +41,71 @@ try:
 except ImportError:
     SHARED_RESULTS = f'/deepfreeze/share/{name4}/results'
 
+# 2026-09 campaign, shared package. OLMo-2 comes from the bf16 re-run (results_bf16); the
+# other families from results/; Pythia checkpoints from repo/results_v2/checkpoints.
+# USE_PKG_RESULTS=False restores the old zip/checkout sources and plots/ output.
+USE_PKG_RESULTS = True
+PKG_ROOT        = f'/deepfreeze/share/{name3}/{name1}_bias_tracing'
+PKG_RESULTS     = f'{PKG_ROOT}/results'
+PKG_RESULTS_BF16 = f'{PKG_ROOT}/results_bf16'
+PKG_CKPT        = {'OLMo-2-0425-1B': f'{PKG_RESULTS_BF16}/checkpoints',
+                   'OLMo-2-0425-1B-Instruct': f'{PKG_RESULTS_BF16}/checkpoints',
+                   'pythia-1b': f'{PKG_ROOT}/repo/results_v2/checkpoints'}
+PKG_CKPT_LOGS   = {'OLMo-2-0425-1B': f'{PKG_RESULTS_BF16}/logs',
+                   'OLMo-2-0425-1B-Instruct': f'{PKG_RESULTS_BF16}/logs',
+                   'pythia-1b': f'{PKG_RESULTS}/logs'}
+if USE_PKG_RESULTS:
+    PLOTS_BASE = f'/deepfreeze/{name1}/{name2}/BiasEdit/bias_tracing/new_plots'
+
+
+FAMILY_PLOT_DIRS = {'olmo_1b': 'olmo2_1b', 'qwen2.5_1.5b': 'qwen2.5_1.5b',
+                    'llama3.2_1b': 'llama3.2_1b', 'gemma3_1b': 'gemma3_1b', 'pythia': 'pythia_1b'}
+
+
+def plot_dir(family, score, category):
+    """new_plots/<family>/<score>/<category>/ — score: ALP (bars) or NIE (lines)."""
+    d = os.path.join(PLOTS_BASE, FAMILY_PLOT_DIRS.get(family, family), score, category)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _pkg_root(model):
+    return PKG_RESULTS_BF16 if model.startswith('OLMo-2') else PKG_RESULTS
+
+
+def _pkg_run_finished(log_path):
+    """A run counts only if its log's last START is followed by a DONE (never partial data)."""
+    try:
+        lines = [l for l in open(log_path, errors='replace') if l.startswith('=== ')]
+    except OSError:
+        return False
+    starts = [i for i, l in enumerate(lines) if l.startswith('=== START')]
+    return bool(starts) and any(l.startswith('=== DONE') for l in lines[starts[-1]:])
+
+
+def _pkg_cases_dir(cases_dir, log_path):
+    if _pkg_run_finished(log_path):
+        return cases_dir
+    print(f'    [pkg] not finished, skipped: {os.path.basename(log_path)}')
+    return cases_dir + '.UNFINISHED'
+
+
+def pkg_within_cases_dir(model, checkpoint, domain):
+    # Instruct step_2000 has the same weights as Instruct main (identical model.safetensors sha256).
+    if checkpoint == 'main' or (model == 'OLMo-2-0425-1B-Instruct' and checkpoint == 'step_2000'):
+        root = _pkg_root(model)
+        return _pkg_cases_dir(f'{root}/{model}/ns3_r0_{model}_{domain}/causal_trace/cases',
+                              f'{root}/logs/{model}_{domain}.log')
+    return _pkg_cases_dir(f'{PKG_CKPT[model]}/{model}/{checkpoint}/{domain}/causal_trace/cases',
+                          f'{PKG_CKPT_LOGS[model]}/{model}_{checkpoint}_{domain}.log')
+
+
+def pkg_cross_cases_dir(source_model, target_model, domain):
+    src, tgt = source_model.split('/')[-1], target_model.split('/')[-1]
+    root, run = _pkg_root(src), f'{src}_to_{tgt}'
+    return _pkg_cases_dir(f'{root}/{run}/ns3_r0_{run}_{domain}/causal_trace/cases',
+                          f'{root}/logs/{run}_{domain}.log')
+
 # ── model references ──────────────────────────────────────────────────────────
 
 BASE_MODEL = 'OLMo-2-0425-1B'
@@ -168,6 +233,11 @@ def cross_patch_family_root(family):
 
 def cross_patch_cases_dir(family, direction_key, domain):
     """Locate one cross-patch run's cases directory, under its family's single root."""
+    if USE_PKG_RESULTS:
+        fam = CROSS_PATCH_FAMILIES[family]
+        src, tgt = ((fam['base_model'], fam['instruct_model']) if direction_key == 'pre_to_post'
+                    else (fam['instruct_model'], fam['base_model']))
+        return pkg_cross_cases_dir(src, tgt, domain)
     return os.path.join(cross_patch_family_root(family),
                         f'{family}_{direction_key}', domain, 'causal_trace', 'cases')
 
@@ -320,6 +390,8 @@ def normalized_indirect_effect(values, mean_low, effect_gap, degenerate='skip', 
 # ── data path helpers ─────────────────────────────────────────────────────────
 
 def local_cases_dir(model_name, org, checkpoint, domain):
+    if USE_PKG_RESULTS:
+        return pkg_within_cases_dir(model_name, checkpoint, domain)
     return os.path.join(LOCAL_BASE, org, model_name,
                         checkpoint, domain, 'causal_trace', 'cases')
 
@@ -561,6 +633,16 @@ def _draw_bars(ax, r1, r2, r3, labels, colors, num_layer, xlabel, ylabel, title,
     all_vals = np.concatenate([r1, r2, r3])
     margin = (all_vals.max() - all_vals.min()) * 0.1 or 0.05
     ax.set_ylim(all_vals.min() - margin, all_vals.max() + margin)
+
+
+def share_ylim(axes):
+    """One y-range for every panel of a figure, so panels can be compared."""
+    axes = [a for a in np.ravel(axes) if a.has_data()]
+    if axes:
+        lo = min(a.get_ylim()[0] for a in axes)
+        hi = max(a.get_ylim()[1] for a in axes)
+        for a in axes:
+            a.set_ylim(lo, hi)
 
 
 def _savepdf(fig, path):
