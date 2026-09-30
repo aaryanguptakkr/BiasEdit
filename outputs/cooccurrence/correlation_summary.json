@@ -1,0 +1,46 @@
+{
+  "type": "instance_level",
+  "total_matched": 1774,
+  "overall": {
+    "n_samples": 1774,
+    "pearson_r_smoothed": 0.0782,
+    "auroc_smoothed": 0.5369,
+    "pearson_r_raw": 0.0951,
+    "auroc_raw": 0.5371,
+    "n_samples_raw": 971
+  },
+  "domains": {
+    "gender": {
+      "n_samples": 255,
+      "pearson_r_smoothed": 0.1993,
+      "auroc_smoothed": 0.5779,
+      "pearson_r_raw": 0.1333,
+      "auroc_raw": 0.5131,
+      "n_samples_raw": 184
+    },
+    "profession": {
+      "n_samples": 810,
+      "pearson_r_smoothed": 0.1303,
+      "auroc_smoothed": 0.5714,
+      "pearson_r_raw": 0.146,
+      "auroc_raw": 0.5729,
+      "n_samples_raw": 490
+    },
+    "race": {
+      "n_samples": 630,
+      "pearson_r_smoothed": -0.0164,
+      "auroc_smoothed": 0.4808,
+      "pearson_r_raw": 0.0108,
+      "auroc_raw": 0.5148,
+      "n_samples_raw": 246
+    },
+    "religion": {
+      "n_samples": 79,
+      "pearson_r_smoothed": -0.0836,
+      "auroc_smoothed": 0.4603,
+      "pearson_r_raw": -0.152,
+      "auroc_raw": 0.4258,
+      "n_samples_raw": 51
+    }
+  }
+}
