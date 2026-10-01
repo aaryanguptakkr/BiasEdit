@@ -26,6 +26,7 @@ import matplotlib.pyplot as plt
 
 from plot_utils import (
     ZIP_PATH, LOCAL_BASE, PLOTS_BASE, MODEL_CONFIGS, BIAS_TYPES,
+    USE_PKG_RESULTS, local_cases_dir, plot_dir,
     FS_SUPTITLE, FS_TITLE, FS_LABEL, FS_TICK,
 )
 
@@ -44,6 +45,8 @@ def _subject_mean(d):
 
 def load_mean_scores_local(cases_dir, kind):
     """Read from extracted filesystem directory."""
+    if not os.path.isdir(cases_dir):
+        return None
     files = [f for f in os.listdir(cases_dir) if f.endswith(f'_{kind}.npz')]
     if not files:
         return None
@@ -86,9 +89,9 @@ def load_mean_scores(zf, org, model_name, checkpoint, domain, kind, source='zip'
     source='local' — always read from extracted NFS files
     source='auto'  — prefer local if extracted, else zip
     """
-    local_dir = os.path.join(LOCAL_BASE, org, model_name,
-                             checkpoint, domain, 'causal_trace', 'cases')
-    use_local = (source == 'local') or (source == 'auto' and os.path.isdir(local_dir))
+    local_dir = local_cases_dir(model_name, org, checkpoint, domain)
+    use_local = (source == 'local') or USE_PKG_RESULTS or \
+                (source == 'auto' and os.path.isdir(local_dir))
 
     if use_local:
         return load_mean_scores_local(local_dir, kind)
@@ -178,7 +181,10 @@ for model_name, cfg in MODEL_CONFIGS.items():
             cb = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
             cb.ax.tick_params(labelsize=FS_TICK)
 
-    out_path = os.path.join(PLOTS_BASE, model_name, 'heatmap_checkpoint_layer.pdf')
+    out_dir = (plot_dir('pythia' if model_name.startswith('pythia') else 'olmo_1b', 'ALP',
+                        os.path.join('checkpoints', model_name))
+               if USE_PKG_RESULTS else os.path.join(PLOTS_BASE, model_name))
+    out_path = os.path.join(out_dir, 'heatmap_checkpoint_layer.pdf')
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     plt.savefig(out_path, format='pdf', bbox_inches='tight')
     plt.close(fig)

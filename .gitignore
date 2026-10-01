@@ -13,6 +13,9 @@ bias_tracing/logs/
 *.pdf
 !bias_tracing/plots/*.pdf
 !bias_tracing/plots/**/*.pdf
+!bias_tracing/new_plots/*.pdf
+!bias_tracing/new_plots/**/*.pdf
+bias_tracing/new_plots/*.log
 
 # Run logs
 bias_tracing/*.log

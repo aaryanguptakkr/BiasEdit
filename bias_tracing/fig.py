@@ -2397,7 +2397,9 @@ for model_name in (models_to_run if RUN_BARS or RUN_DELTA or RUN_COMPARE else []
     cfg = MODEL_CONFIGS[model_name]
     org = cfg['org']
 
-    model_out_dir  = os.path.join(PLOTS_BASE, model_name)
+    model_out_dir  = _out(os.path.join(PLOTS_BASE, model_name),
+                          'pythia' if model_name.startswith('pythia') else 'olmo_1b',
+                          'ALP', os.path.join('checkpoints', model_name))
     all_ckpt_stats = []
 
     # cross-checkpoint accumulator: domain → list of (label, r1, r2, r3, nl)
@@ -2406,7 +2408,7 @@ for model_name in (models_to_run if RUN_BARS or RUN_DELTA or RUN_COMPARE else []
 
     for checkpoint, ckpt_label in cfg['checkpoints']:
         print(f'\n=== {model_name}  [{ckpt_label}] ===')
-        out_ckpt_dir = os.path.join(PLOTS_BASE, model_name, ckpt_label)
+        out_ckpt_dir = os.path.join(model_out_dir, ckpt_label)
 
         states_data = {}
         words_data  = {}
@@ -2589,8 +2591,8 @@ for model_name in (models_to_run if RUN_BARS or RUN_DELTA or RUN_COMPARE else []
 BASE     = 'OLMo-2-0425-1B'
 INSTRUCT = 'OLMo-2-0425-1B-Instruct'
 if RUN_COMPARE and BASE in all_models_stats and INSTRUCT in all_models_stats:
-    compare_dir = os.path.join(PLOTS_BASE, 'compare')
-    os.makedirs(compare_dir, exist_ok=True)
+    compare_dir = _out(os.path.join(PLOTS_BASE, 'compare'), 'olmo_1b', 'ALP',
+                       os.path.join('checkpoints', 'compare'))
     print(f'\n  Generating base vs instruct comparison → plots/compare/')
     save_bias_trajectory(
         all_models_stats[BASE],
