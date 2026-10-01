@@ -477,41 +477,47 @@ directly and never assumes the `[low, high]` anchoring that breaks above.
 
 ## 12. Provenance: what the existing result files are
 
-**Final results (audited 2026-09-27).** All 69 run × domain folders are complete: every case
-has its single-state, MLP and Attn file, all readable, all with the signed fields. §5's worked
-example still uses an older legacy file.
-- Self and cross runs: `<pkg>/results/<run>/`. Checkpoint runs (Pythia, OLMo stage1):
-  `<pkg>/repo/results_v2/checkpoints/`. **Do not use `<pkg>/results/v0/`**: superseded runs,
-  partly computed on RTX PRO 6000 Blackwell cards.
-- Software: torch 2.11.0+cu128, transformers 5.3.0, for every run.
-- Precision = each model's published dtype: OLMo-2 base fp32, OLMo-2-Instruct bf16, Qwen/Llama/
-  Gemma bf16, Pythia fp16. OLMo base vs Instruct therefore also differs in precision. Checked
-  on 100 OLMo base cases (34 gender, 33 profession, 33 race; deepsea GPU7, RTX A6000) run in
-  both fp32 and bf16: the NIE curves by layer differ by at most 0.004, with the same peak
-  layers (single state 0, MLP 11, Attn 2); per-case clean scores differ by 0.006 on average
-  (typical size 0.47), with no sign flips. Precision does not explain base vs Instruct
-  differences.
-- For every target model, self and cross runs give bit-identical clean and corrupted scores
-  (these depend only on the target), even when computed on different machines.
+**Final results (audited 2026-09-30).** Every run below is complete and was checked file by
+file: all cases present, all files readable, no NaN, signed fields stored, revision and dtype
+recorded as expected. All runs used torch 2.11.0+cu128, transformers 5.3.0, NVIDIA RTX A6000.
 
-**GPUs.** Every result was computed on an NVIDIA RTX A6000 (48 GB). Machine and card, per run
-(same for all three domains unless noted):
+| results | location (`<pkg>` = shared package) | precision |
+|---|---|---|
+| OLMo-2 1B base, Instruct, base→Instruct, Instruct→base | `<pkg>/results_bf16/<run>/` | bf16 |
+| OLMo-2 1B checkpoints (11, below) | `<pkg>/results_bf16/checkpoints/` | bf16 |
+| Qwen2.5-1.5B, Llama-3.2-1B, Gemma-3-1B (base, Instruct, both cross directions) | `<pkg>/results/<run>/` | bf16 |
+| Pythia-1b checkpoints step0, 1k, 5k, 81k, 137k, 143k | `<pkg>/repo/results_v2/checkpoints/` | fp16 |
 
-| run | machine, card |
+- **OLMo-2 checkpoints:** base 0B, 21B, 315B, 2.4T, 4T, s2-3B, s2-24B, s2-51B, `main`;
+  Instruct step200, step1400, step2000, step2600. Instruct `main` and `step_2000` have identical
+  weights (same model.safetensors sha256), so the Instruct runs are step2000. Base `main` is not
+  s2-51B (different weights), so both are traced.
+- **Precision:** every model at one dtype for base and Instruct (OLMo-2 re-run in bf16 on
+  2026-09-28, replacing the fp32 base). The old fp32 OLMo files stay in `<pkg>/results/` for
+  comparison only. Re-running OLMo-2 Instruct in bf16 reproduced the earlier files bit for bit (gender, profession checked).
+  An fp32-vs-bf16 check on 100 OLMo base cases moved the NIE curves by at most 0.004, with the
+  same peak layers.
+- **Do not use** `<pkg>/results/v0/` (superseded runs, partly on RTX PRO 6000 Blackwell cards).
+- **Consistency:** for every target model, self and cross runs give bit-identical clean and
+  corrupted scores. In every self run (all 11 OLMo checkpoints, all domains), restoring tokens
+  before the subject reproduces the corrupted score exactly: no numerical drift.
+- **Restoration window:** 5 layers for 16-layer models (OLMo-2, Llama-3.2, Pythia), 7 for
+  Qwen2.5 (28 layers) and Gemma-3 (26). The current paper text says "10-layer window".
+
+**GPUs** (all RTX A6000):
+
+| run | machine, GPU |
 |---|---|
-| OLMo-2 base; Instruct; Instruct→base | deepb GPU3 |
-| OLMo-2 base→Instruct | deepb GPU1 |
-| OLMo-2 stage1-step10000 | deepb GPU1; ~145 gender cases (written 2026-09-21 19:26–21:00) by a launch whose log was overwritten, machine not recorded |
-| Pythia-1b, all 6 checkpoints | deepb GPU1 |
-| Qwen2.5 base; Instruct; base→Instruct | deepdiver GPU0 |
-| Qwen2.5 Instruct→base | deepdiver GPU1 |
-| Llama-3.2 base; Instruct→base | deepdiver GPU1 |
-| Llama-3.2 Instruct | deepdiver GPU1; race by deepdiver GPU1 and GPU3 running at the same time (plus 8 files from an unrecorded launch; they match an A6000 run exactly) |
-| Llama-3.2 base→Instruct | deepdiver GPU2 |
-| Gemma-3 pt | deepb GPU3 |
-| Gemma-3 it→pt | deepb GPU1; part of gender while deepb GPU3 also ran it |
-| Gemma-3 it | deepdiver GPU0; race by deepdiver GPU0 and GPU3 running at the same time |
-| Gemma-3 pt→it | deepb GPU1 |
+| OLMo-2 base / Instruct / base→Instruct (bf16) | deepdiver 0 / 2 / 3 |
+| OLMo-2 Instruct→base, checkpoint 21B (bf16) | deepb 1, deepb 3 |
+| OLMo-2 checkpoints, gender (10) | deepsea 3–7 |
+| OLMo-2 checkpoints 0B, 2.4T, s2-3B: profession, race | deepdiver 0, 2, 3 |
+| OLMo-2 checkpoints s2-51B, step1400: race / profession | deepdiver 0, 2 / deepsea 3, 4 |
+| OLMo-2 checkpoints 315B, 4T, s2-24B, step200, step2600: profession, race | deepsea 3–7 |
+| Pythia-1b, 6 checkpoints | deepb 1 |
+| Qwen2.5 base, Instruct, base→Instruct / Instruct→base | deepdiver 0 / 1 |
+| Llama-3.2 base, Instruct, Instruct→base / base→Instruct | deepdiver 1 (Instruct race also 3) / 2 |
+| Gemma-3 pt / it / pt→it, it→pt | deepb 3 / deepdiver 0 (race also 3) / deepb 1 (it→pt gender partly deepb 3) |
 
 **Cases analysed** (unique examples, after skips):
 
@@ -527,16 +533,15 @@ its 1446 examples as 2682 rows of exact copies, so logs saying "2681 samples" ov
 results are unaffected (one file per example). Case sets differ by family because the skips
 depend on the tokenizer.
 
-**Small numerical caveat (re-checked 2026-09-27 on deepsea GPU7, RTX A6000, card not shared).**
-From 2026-09-22 07:22, jobs on deepb GPU1 produced slightly different numbers (the card's own
-state changed; not precision, not the code).
-- OLMo stage1: 34 gender, 530 profession, 849 race cases are affected, by at most 0.003 in
-  score. A fresh run reproduces the unaffected cases exactly and removes the deviation.
-  Negligible next to the reported effects.
-- OLMo base→Instruct gender: the last 140 cases (written after 07:22) differ from a fresh
-  run by up to 0.025 (median 0.004); the fresh run and the older `v0` run agree exactly. Its
-  profession and race runs match `v0` exactly and are unaffected.
-- The ~145 stage1 gender cases from the unrecorded launch differ from a fresh run by ~2e-6.
+**Plots** (`fig.py --plots appendix cross_patch cp_nie`; checkpoint plots with
+`--plots bars delta compare` and `scripts/plot_checkpoint_heatmap.py`): written to
+`new_plots/<family>/{ALP,NIE}/{within,prepost,postpre,cross}/` and
+`new_plots/<family>/ALP/checkpoints/`. ALP = bar charts (absolute log-prob difference), NIE =
+signed line plots. One y-range per multi-panel figure.
+
+**Old fp32 OLMo files only (not used above):** from 2026-09-22 07:22, jobs on deepb GPU1 gave
+slightly different numbers (up to 0.025 in OLMo base→Instruct gender, 0.003 in stage1). The
+bf16 re-runs replace these files and show no such deviation.
 
 ## 13. Concept → code
 
