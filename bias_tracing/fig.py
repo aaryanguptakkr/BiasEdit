@@ -76,12 +76,12 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from plot_utils import (
-    ZIP_PATH, MAIN_ZIP, PLOTS_BASE, USE_PKG_RESULTS, BASE_MODEL, plot_dir,
+    ZIP_PATH, MAIN_ZIP, PLOTS_BASE, USE_PKG_RESULTS, BASE_MODEL, plot_dir, paper_dir, disk_cache,
     MODEL_CONFIGS, BIAS_TYPES, PAPER_DOMAINS,
     CROSS_PATCH_BASE, CROSS_PATCH_CONFIGS, CROSS_PATCH_FAMILIES,
     cross_patch_cases_dir,
     STATES_LABELS, WORDS_LABELS, BAR_COLORS, STATES_COLORS, WORDS_COLORS,
-    LOW_SIGNAL, Y_LABEL_BARS, Y_LABEL_NIE,
+    LOW_SIGNAL, Y_LABEL_BARS, Y_LABEL_NIE, FAMILY_PLOT_DIRS,
     FS_SUPTITLE, FS_TITLE, FS_LABEL, FS_TICK, FS_LEGEND, FS_ANNOT,
     FIG_BAR_W_SINGLE, FIG_BAR_H_SINGLE, FIG_BAR_W_PER_COL,
     FIG_GRID_W_PER_COL, FIG_ROW_H, FIG_LINE_W_PER_PAN, FIG_TRAJ_H,
@@ -150,6 +150,14 @@ models_to_run      = [args.model]     if args.model     else list(MODEL_CONFIGS.
 domains_to_run     = [args.bias]      if args.bias       else BIAS_TYPES
 directions_to_run  = [args.direction] if args.direction  else list(CROSS_PATCH_CONFIGS.keys())
 cp_families_to_run = [args.cp_family] if args.cp_family  else list(CROSS_PATCH_FAMILIES.keys())
+
+def _paper(legacy_dir, family=None):
+    """Paper figure folder: new_plots/main/ (family=None) or new_plots/appendix/<family>/."""
+    if USE_PKG_RESULTS:
+        return paper_dir(family)
+    os.makedirs(legacy_dir, exist_ok=True)
+    return legacy_dir
+
 
 def _out(legacy_dir, family, score, category):
     """Output folder: new_plots/<family>/<score>/<category>/ in package mode, else the old one."""
@@ -801,6 +809,8 @@ def _finalize_result_dict(single_items, attn_items, mlp_items, loader, num_layer
 
 
 @functools.lru_cache(maxsize=None)   # each figure reloads the same runs; read them once
+@disk_cache(lambda direction_key, domain, num_sample=None, family='olmo_1b':
+            cross_patch_cases_dir(family, direction_key, domain))
 def load_cross_patch_domain(direction_key, domain, num_sample=None, family='olmo_1b'):
     """
     Load cross-patch .npz files for one (family, direction, domain) triple.
@@ -1083,6 +1093,8 @@ def load_within_model_from_zip(zf, zip_names_all, model_name, org, checkpoint, d
 
 
 @functools.lru_cache(maxsize=None)
+@disk_cache(lambda model_name, org, checkpoint, domain, num_sample=None:
+            local_cases_dir(model_name, org, checkpoint, domain))
 def load_within_model_from_local(model_name, org, checkpoint, domain, num_sample=None):
     """
     Load within-model causal tracing results from the local filesystem for one
@@ -1358,7 +1370,11 @@ def _load_from_main_zip(main_zf, domain, num_sample=None):
 
 
 def _load_family_pair(family, domains, num_sample=None, main_zf=None):
-    """Within-model base and instruct results for one CROSS_PATCH_FAMILIES entry."""
+    """Within-model base and instruct results for one CROSS_PATCH_FAMILIES entry (or 'pythia')."""
+    if family == 'pythia':   # no instruct model
+        base = {d: load_within_model_from_local('pythia-1b', 'EleutherAI', 'step143000', d, num_sample)
+                for d in domains}
+        return base, {}, 'Pythia-1b (step143000)', None
     fam = CROSS_PATCH_FAMILIES[family]
     (b_org, b_name), (i_org, i_name) = (fam[k].split('/') for k in ('base_model', 'instruct_model'))
     if family == 'olmo_1b':
@@ -1404,7 +1420,7 @@ def _row_ylim(results_dict, paper_domains, *keys):
     return float(flat.min()) - margin, float(flat.max()) + margin
 
 
-def _bars_grid(axes, row_specs, paper_domains, row_ylims):
+def _bars_grid(axes, row_specs, paper_domains, row_ylims, letter_start=0):
     """
     Fill a rows×cols axes grid with labelled bar charts.
 
@@ -1416,7 +1432,7 @@ def _bars_grid(axes, row_specs, paper_domains, row_ylims):
     row_ylims    : list of (y_min, y_max) per row; None entries mean auto-scale
     """
     alphabet   = 'abcdefghijklmnopqrstuvwxyz'
-    letter_idx = 0
+    letter_idx = letter_start
 
     for row, (results_dict, plot_type, bar_colors, model_label, type_label) in enumerate(row_specs):
         y_min_r, y_max_r = row_ylims[row] if row_ylims is not None else (None, None)
@@ -1544,177 +1560,137 @@ def save_appendix_A2_pythia_bars(out_dir, num_sample=None):
 
 # ── appendix A3: NIE line plots (4×3) ────────────────────────────────────────
 
+_NIE_FIELDS = {'bias': 'bias_mean_signed', 'mlp': 'mlp_mean_signed', 'attn': 'attn_mean_signed',
+               'pre_blank': 'pre_blank_mean_signed', 'blank': 'blank_mean_signed'}
+_NIE_ROWS = {
+    'states': (('bias', 'mlp', 'attn'), ['Single state', 'MLP window', 'Attn window'], 'States NIE'),
+    'words':  (('bias', 'pre_blank', 'blank'), ['Subject token', 'Pre-target token', 'Target token'], 'Words NIE'),
+}
+_LINESTYLES = (('-', 'o'), ('--', 's'))   # first model solid, second dashed
+
+
+def _nie_curve(res, key):
+    """Signed-chain NIE, as everywhere else; None if missing or the gap is too small to trust."""
+    if res is None:
+        return None
+    arr, gap, low = res.get(_NIE_FIELDS[key]), res.get('effect_gap_signed'), res.get('mean_low_signed')
+    if arr is None or low is None or not signed_gap_reliable(gap):
+        return None
+    return normalized_indirect_effect(arr, low, gap, signed=True)
+
+
+def _nie_line_rows(axes, kinds, models, letter_start=0, fs=(11, 14, 12)):
+    """Draw NIE line rows. kinds: e.g. ['states', 'words']; models: [(results_by_domain, label), ...]
+    drawn solid then dashed. Returns all plotted values (for a shared y-range)."""
+    fs_title, fs_label, fs_tick = fs
+    vals, letter = [], letter_start
+    for row, kind in enumerate(kinds):
+        keys, cond_labels, tag = _NIE_ROWS[kind]
+        colors = BAR_COLORS if kind == 'states' else WORDS_COLORS
+        for col, domain in enumerate(PAPER_DOMAINS):
+            ax = axes[row, col]
+            n_lay = 16
+            for (results, _label), (ls, mk) in zip(models, _LINESTYLES):
+                res = results.get(domain)
+                for key, color in zip(keys, colors):
+                    nie = _nie_curve(res, key)
+                    if nie is None:
+                        continue
+                    n_lay = max(n_lay if res is None else res['num_layer'], len(nie))
+                    ax.plot(np.arange(len(nie)), nie, color=color, linestyle=ls, marker=mk,
+                            linewidth=2.0, markersize=3)
+                    vals.extend(nie.tolist())
+            who = ' (solid) vs '.join(lab for _, lab in models) + (' (dashed)' if len(models) > 1 else '')
+            ax.set_title(f'({"abcdefghijklmnopqrstuvwxyz"[letter]}) {domain.capitalize()} — {tag}\n{who}',
+                         fontsize=fs_title)
+            letter += 1
+            ax.axhline(0, color='black', linewidth=0.7, alpha=0.4)
+            ax.set_xlabel('Layer', fontsize=fs_label)
+            if col == 0:
+                ax.set_ylabel(Y_LABEL_NIE, fontsize=fs_label)
+            ax.set_xticks(_layer_ticks(n_lay))
+            ax.tick_params(labelsize=fs_tick)
+            ax.grid(alpha=0.2)
+    return vals
+
+
+def _nie_legend(fig, kinds, models, fontsize):
+    """Legend spelling out colour = condition and line style = model."""
+    from matplotlib.lines import Line2D
+    handles = []
+    for kind in kinds:
+        _, cond_labels, _ = _NIE_ROWS[kind]
+        colors = BAR_COLORS if kind == 'states' else WORDS_COLORS
+        for cond, color in zip(cond_labels, colors):
+            for (_, label), (ls, mk) in zip(models, _LINESTYLES):
+                style = 'solid' if ls == '-' else 'dashed'
+                handles.append(Line2D([0], [0], color=color, linestyle=ls, marker=mk, linewidth=2,
+                                      label=f'{cond}: {label} ({style})'))
+    fig.legend(handles=handles, loc='lower center', bbox_to_anchor=(0.5, 0.0),
+               ncol=min(4, len(handles)), fontsize=fontsize, frameon=True)
+
+
+def _set_ylim(axes, vals):
+    if vals:
+        m = (max(vals) - min(vals)) * 0.12 or 0.05
+        for ax in np.ravel(axes):
+            ax.set_ylim(min(vals) - m, max(vals) + m)
+
+
 def save_appendix_A3_nie_lines(out_dir, num_sample=None, main_zf=None, family='olmo_1b'):
     """
-    Appendix A3: 4×3 NIE layer-profile figure.
-    Row 0: OLMo base (solid) vs OLMo Instruct (dashed) — states NIE — 3 domains.
-    Row 1: OLMo base (solid) vs OLMo Instruct (dashed) — words  NIE — 3 domains.
-    Row 2: OLMo base (solid) vs Pythia (dashed)         — states NIE — 3 domains.
-    Row 3: OLMo base (solid) vs Pythia (dashed)         — words  NIE — 3 domains.
-
-    States rows use BAR_COLORS; words rows use WORDS_COLORS.
-    States rows share one Y-range; words rows share a separate Y-range.
+    A3, two versions for one base/Instruct family (columns: gender, race, profession):
+      A3-1  2×3: NIE lines, states and words; base solid, Instruct dashed.
+      A3-2  4×3: rows 1-2 as A3-1; row 3 ALP states bars of the base model, row 4 of the Instruct model.
     """
-    from matplotlib.lines import Line2D
-
-    A3_FS_TITLE  = FS_TITLE + 1      # 11
-    A3_FS_LABEL  = FS_LABEL  + 5   # 14
-    A3_FS_TICK   = FS_TICK   + 4   # 12
-    A3_FS_LEGEND = FS_LEGEND + 6   # 13
-
     print(f'  [A3] Loading {family} base + instruct...')
-    base_results, inst_results, b_name, i_name = _load_family_pair(
-        family, PAPER_DOMAINS, num_sample, main_zf)
+    base, inst, b_name, i_name = _load_family_pair(family, PAPER_DOMAINS, num_sample, main_zf)
+    models = [(base, b_name), (inst, i_name)]
+    sfx = '' if family == 'olmo_1b' else f'-{family}'
 
-    pythia_results = {}
-    if family == 'olmo_1b':   # the OLMo-vs-Pythia rows exist only for OLMo
-        print('  [A3] Loading Pythia (step143000)...')
-        pythia_results = {d: load_within_model_from_zip(
-            zf, zip_names_all, 'pythia-1b', 'EleutherAI', 'step143000', d, num_sample)
-            for d in PAPER_DOMAINS}
+    for version in (1,):   # A3-2 (with ALP bar rows) was tried and dropped
+        n_rows = 2 if version == 1 else 4
+        fig, axes = plt.subplots(n_rows, 3, figsize=(FIG_LINE_W_PER_PAN * 3, (FIG_ROW_H + 0.6) * n_rows))
+        vals = _nie_line_rows(axes[:2], ['states', 'words'], models)
+        _set_ylim(axes[:2], vals)
+        if version == 2:
+            bar_rows = [(base, 'states', STATES_COLORS, b_name, 'ALP, effect of states'),
+                        (inst, 'states', STATES_COLORS, i_name, 'ALP, effect of states')]
+            _bars_grid(axes[2:], bar_rows, PAPER_DOMAINS, None, letter_start=6)
+            share_ylim(axes[2:])
+        _nie_legend(fig, ['states', 'words'], models, FS_LEGEND + 5)
+        if version == 2:
+            fig.legend(handles=[Patch(facecolor=STATES_COLORS[i], edgecolor='gray',
+                                      label=f'{STATES_LABELS[i]} (bars, rows 3-4)') for i in range(3)],
+                       loc='lower center', bbox_to_anchor=(0.5, 0.075), ncol=3,
+                       fontsize=FS_LEGEND + 5, frameon=True)
+        fig.tight_layout(rect=[0, (0.17 if version == 1 else 0.17), 1, 1.0])
+        _savepdf(fig, os.path.join(out_dir, f'A3-nie-lines{sfx}.pdf'))
 
-    STATES_KEYS   = ('bias', 'mlp', 'attn')
-    STATES_LABELS_SHORT = ['States', 'MLP window', 'Attn window']
-    WORDS_KEYS    = ('bias', 'pre_blank', 'blank')
-    WORDS_LABELS_SHORT  = [
-        'Effect of subject token',
-        'Effect of pre-target token',
-        'Effect of target token',
-    ]
 
-    def _nie(res, key):
-        """Compute NIE for a given data key in a result dict -- signed chain, same
-        definition as everywhere else. None if the field, the signed data, or a
-        large-enough signed gap isn't available (see signed_gap_reliable)."""
-        key_map = {
-            'bias':      'bias_mean_signed',
-            'mlp':       'mlp_mean_signed',
-            'attn':      'attn_mean_signed',
-            'pre_blank': 'pre_blank_mean_signed',
-            'blank':     'blank_mean_signed',
-        }
-        if res is None:
-            return None
-        arr = res.get(key_map[key])
-        gap_s, low_s = res.get('effect_gap_signed'), res.get('mean_low_signed')
-        if arr is None or low_s is None or not signed_gap_reliable(gap_s):
-            return None
-        return normalized_indirect_effect(arr, low_s, gap_s, signed=True)
-
-    # compute Y ranges separately for states rows and words rows
-    states_vals, words_vals = [], []
-    for results_dict in (base_results, inst_results, pythia_results):
-        for d in PAPER_DOMAINS:
-            res = results_dict.get(d)
-            for k in STATES_KEYS:
-                v = _nie(res, k)
-                if v is not None:
-                    states_vals.extend(v.tolist())
-            for k in WORDS_KEYS:
-                v = _nie(res, k)
-                if v is not None:
-                    words_vals.extend(v.tolist())
-
-    if not states_vals and not words_vals:
-        print('  [A3] No valid NIE data; skipping.')
-        return
-
-    def _yrange(vals):
-        if not vals:
-            return -0.1, 1.1
-        m = (max(vals) - min(vals)) * 0.12 or 0.05
-        return min(vals) - m, max(vals) + m
-
-    states_ymin, states_ymax = _yrange(states_vals)
-    words_ymin,  words_ymax  = _yrange(words_vals)
-
-    # 4 rows: (plot_type, model1_results, label1, model2_results, label2)
-    ROW_DEFS = [
-        ('states', base_results, f'{b_name} (solid)', inst_results, f'{i_name} (dashed)'),
-        ('words',  base_results, f'{b_name} (solid)', inst_results, f'{i_name} (dashed)'),
-    ]
-    if pythia_results:
-        ROW_DEFS += [
-            ('states', base_results, f'{b_name} (solid)', pythia_results, 'Pythia-1B (dashed)'),
-            ('words',  base_results, f'{b_name} (solid)', pythia_results, 'Pythia-1B (dashed)'),
-        ]
-    letters_all = list('abcdefghijkl')
-    n_rows = len(ROW_DEFS)
-    n_lay = _n_layers(*base_results.values(), *inst_results.values())
-
-    fig, axes = plt.subplots(n_rows, 3, figsize=(FIG_LINE_W_PER_PAN * 3, (FIG_ROW_H + 0.5) * n_rows))
-    letter_idx = 0
-
-    for row, (plot_type, model1_results, model1_label, model2_results, model2_label) in enumerate(ROW_DEFS):
-        is_states = (plot_type == 'states')
-        keys      = STATES_KEYS   if is_states else WORDS_KEYS
-        labels    = STATES_LABELS_SHORT if is_states else WORDS_LABELS_SHORT
-        colors    = BAR_COLORS    if is_states else WORDS_COLORS
-        ymin      = states_ymin   if is_states else words_ymin
-        ymax      = states_ymax   if is_states else words_ymax
-        type_tag  = 'States NIE'  if is_states else 'Words NIE'
-
-        for col, domain in enumerate(PAPER_DOMAINS):
-            ax     = axes[row, col]
-            letter = letters_all[letter_idx]
-            letter_idx += 1
-            res1 = model1_results.get(domain)
-            res2 = model2_results.get(domain)
-
-            for ki, (key, cond_label) in enumerate(zip(keys, labels)):
-                color = colors[ki]
-                nie1  = _nie(res1, key)
-                nie2  = _nie(res2, key)
-                if nie1 is not None:
-                    xs = np.arange(len(nie1))
-                    ax.plot(xs, nie1, color=color, linewidth=2.0, linestyle='-',
-                            marker='o', markersize=3)
-                if nie2 is not None:
-                    xs = np.arange(len(nie2))
-                    ax.plot(xs, nie2, color=color, linewidth=2.0, linestyle='--',
-                            marker='s', markersize=3)
-
-            ax.axhline(0, color='black', linewidth=0.7, alpha=0.4)
-            ax.set_title(
-                f'({letter}) {domain.capitalize()} — {type_tag}\n'
-                f'{model1_label} vs {model2_label}',
-                fontsize=A3_FS_TITLE)
-            ax.set_xlabel('Layer', fontsize=A3_FS_LABEL)
-            if col == 0:
-                ax.set_ylabel(Y_LABEL_NIE, fontsize=A3_FS_LABEL)
-            ax.set_ylim(ymin, ymax)
-            ax.set_xticks(_layer_ticks(n_lay))
-            ax.tick_params(labelsize=A3_FS_TICK)
-            ax.grid(alpha=0.2)
-
-    # two legend blocks at bottom: states (BAR_COLORS) and words (WORDS_COLORS)
-    legend_handles = []
-    for ki, cond_label in enumerate(STATES_LABELS_SHORT):
-        c = BAR_COLORS[ki]
-        legend_handles.append(
-            Line2D([0], [0], color=c, linewidth=2, linestyle='-',
-                   marker='o', markersize=4, label=f'{cond_label} — solid'))
-        legend_handles.append(
-            Line2D([0], [0], color=c, linewidth=2, linestyle='--',
-                   marker='s', markersize=4, label=f'{cond_label} — dashed'))
-    # separator
-    legend_handles.append(Line2D([0], [0], color='none', label=''))
-    for ki, cond_label in enumerate(WORDS_LABELS_SHORT):
-        c = WORDS_COLORS[ki]
-        legend_handles.append(
-            Line2D([0], [0], color=c, linewidth=2, linestyle='-',
-                   marker='o', markersize=4, label=f'{cond_label} — solid'))
-        legend_handles.append(
-            Line2D([0], [0], color=c, linewidth=2, linestyle='--',
-                   marker='s', markersize=4, label=f'{cond_label} — dashed'))
-
-    fig.legend(handles=legend_handles, loc='lower center', bbox_to_anchor=(0.5, 0.0),
-               ncol=4, fontsize=A3_FS_LEGEND, frameon=True,
-               labelspacing=1.0, handlelength=3.0, handletextpad=0.8, columnspacing=2.5)
-    share_ylim(axes)
-    fig.tight_layout(rect=[0, 0.10 * 4 / n_rows, 1, 1.0])
-    _savepdf(fig, os.path.join(out_dir, 'A3-nie-lines.pdf' if family == 'olmo_1b'
-                               else f'A3-nie-lines-{family}.pdf'))
+def save_model_pair_nie(out_dir, fam_a, fam_b, num_sample=None):
+    """
+    B: model vs model NIE (columns: gender, race, profession). Model A solid, model B dashed.
+      rows 1-2: base models, states and words NIE
+      rows 3-4: Instruct models, states and words NIE (only when both families have one)
+    """
+    a_base, a_inst, a_bname, a_iname = _load_family_pair(fam_a, PAPER_DOMAINS, num_sample)
+    b_base, b_inst, b_bname, b_iname = _load_family_pair(fam_b, PAPER_DOMAINS, num_sample)
+    lab = lambda f: 'Pythia-1b (step143000)' if f == 'pythia' else CROSS_PATCH_FAMILIES[f]['label']
+    base_tag = lambda f: lab(f) if f == 'pythia' else f'{lab(f)} base'
+    blocks = [[(a_base, base_tag(fam_a)), (b_base, base_tag(fam_b))]]
+    if a_iname and b_iname:
+        blocks.append([(a_inst, f'{lab(fam_a)} Instruct'), (b_inst, f'{lab(fam_b)} Instruct')])
+    n_rows = 2 * len(blocks)
+    fig, axes = plt.subplots(n_rows, 3, figsize=(FIG_LINE_W_PER_PAN * 3, (FIG_ROW_H + 0.6) * n_rows))
+    vals = []
+    for i, models in enumerate(blocks):
+        vals += _nie_line_rows(axes[2 * i:2 * i + 2], ['states', 'words'], models, letter_start=6 * i)
+    _set_ylim(axes, vals)
+    _nie_legend(fig, ['states', 'words'], [(None, lab(fam_a)), (None, lab(fam_b))], FS_LEGEND + 5)
+    fig.tight_layout(rect=[0, (0.17 if n_rows == 2 else 0.10), 1, 1.0])
+    name = lambda f: FAMILY_PLOT_DIRS.get(f, f)
+    _savepdf(fig, os.path.join(out_dir, f'B-nie-{name(fam_a)}-vs-{name(fam_b)}.pdf'))
 
 
 # ── main body: NIE overlay (gender, single panel) ────────────────────────────
@@ -1730,7 +1706,7 @@ def save_main_body_nie_overlay(out_dir, num_sample=None, main_zf=None, family='o
 
     print(f'  [NIE overlay] Loading {family} base + instruct...')
     _b, _i, b_name, i_name = _load_family_pair(family, ['gender'], num_sample, main_zf)
-    base_res, inst_res = _b['gender'], _i['gender']
+    base_res, inst_res = _b['gender'], _i.get('gender')
     n_lay = _n_layers(base_res, inst_res)
 
     SCORE_KEYS = ('states_score', 'mlp_score', 'attn_score')
@@ -1779,7 +1755,7 @@ def save_main_body_nie_overlay(out_dir, num_sample=None, main_zf=None, family='o
                     marker='s', markersize=3)
 
     ax.axhline(0, color='black', linewidth=0.7, alpha=0.4)
-    ax.set_title(f'(a) Gender\n{b_name} (solid) vs {i_name} (dashed)',
+    ax.set_title(f'(a) Gender\n{b_name} (solid)' + (f' vs {i_name} (dashed)' if i_name else ''),
                  fontsize=FS_TITLE+3)
     ax.set_xlabel('Layer', fontsize=FS_LABEL+5)
     ax.set_ylabel('NIE (normalized indirect effect)', fontsize=FS_LABEL+5)
@@ -2018,14 +1994,14 @@ def save_crosspatch_nie_overlay(out_dir, num_sample=None, main_zf=None, family='
 
     # rows: (plot_type, within_results, within_label, cross_results, cross_label)
     ROW_DEFS = [
-        ('states', post_results, 'Post within-model (solid)',
-                   p2post_results, 'Pre→Post cross-patch (dashed)'),
-        ('words',  post_results, 'Post within-model (solid)',
-                   p2post_results, 'Pre→Post cross-patch (dashed)'),
-        ('states', pre_results,  'Pre within-model (solid)',
-                   p2pre_results,  'Post→Pre cross-patch (dashed)'),
-        ('words',  pre_results,  'Pre within-model (solid)',
-                   p2pre_results,  'Post→Pre cross-patch (dashed)'),
+        ('states', post_results, f'{i_name} within-model (solid)',
+                   p2post_results, f'{b_name} → {i_name} cross-patch (dashed)'),
+        ('words',  post_results, f'{i_name} within-model (solid)',
+                   p2post_results, f'{b_name} → {i_name} cross-patch (dashed)'),
+        ('states', pre_results,  f'{b_name} within-model (solid)',
+                   p2pre_results,  f'{i_name} → {b_name} cross-patch (dashed)'),
+        ('words',  pre_results,  f'{b_name} within-model (solid)',
+                   p2pre_results,  f'{i_name} → {b_name} cross-patch (dashed)'),
     ]
     letters_all = list('abcdefghijkl')
 
@@ -2074,19 +2050,19 @@ def save_crosspatch_nie_overlay(out_dir, num_sample=None, main_zf=None, family='
         c = BAR_COLORS[ki]
         legend_handles.append(
             Line2D([0], [0], color=c, linewidth=2, linestyle='-',
-                   marker='o', markersize=4, label=f'{cond_label} — within (solid)'))
+                   marker='o', markersize=4, label=f'{cond_label}: within-model patching (solid)'))
         legend_handles.append(
             Line2D([0], [0], color=c, linewidth=2, linestyle='--',
-                   marker='s', markersize=4, label=f'{cond_label} — cross (dashed)'))
+                   marker='s', markersize=4, label=f'{cond_label}: cross-model patching (dashed)'))
     legend_handles.append(Line2D([0], [0], color='none', label=''))
     for ki, cond_label in enumerate(WORDS_LABELS_SHORT):
         c = WORDS_COLORS[ki]
         legend_handles.append(
             Line2D([0], [0], color=c, linewidth=2, linestyle='-',
-                   marker='o', markersize=4, label=f'{cond_label} — within (solid)'))
+                   marker='o', markersize=4, label=f'{cond_label}: within-model patching (solid)'))
         legend_handles.append(
             Line2D([0], [0], color=c, linewidth=2, linestyle='--',
-                   marker='s', markersize=4, label=f'{cond_label} — cross (dashed)'))
+                   marker='s', markersize=4, label=f'{cond_label}: cross-model patching (dashed)'))
 
     fig.legend(handles=legend_handles, loc='lower center', bbox_to_anchor=(0.5, 0.0),
                ncol=4, fontsize=A7_FS_LEGEND, frameon=True,
@@ -2139,7 +2115,7 @@ def save_appendix_A4_cross_patch_bars(all_direction_results, out_dir,
 
 # ── appendix A5: effect gap trajectory (3×1) ─────────────────────────────────
 
-def save_appendix_A5_trajectory(base_stats, instruct_stats, out_dir):
+def save_appendix_A5_trajectory(base_stats, instruct_stats, out_dir, out_name='A5-trajectory.pdf'):
     """
     Appendix A5: 3×1 effect gap trajectory for OLMo base + instruct.
     One panel per paper domain (rows); panel title = domain name only.
@@ -2226,12 +2202,13 @@ def save_appendix_A5_trajectory(base_stats, instruct_stats, out_dir):
     fig.legend(handles, labels_leg, loc='lower center', bbox_to_anchor=(0.5, 0.0),
                ncol=2, fontsize=A5_FS_LEGEND, frameon=True)
     fig.tight_layout(rect=[0, 0.06, 1, 1.0])
-    _savepdf(fig, os.path.join(out_dir, 'A5-trajectory.pdf'))
+    _savepdf(fig, os.path.join(out_dir, out_name))
 
 
 # ── appendix A6: NIE heatmap (layer × checkpoint) ────────────────────────────
 
-def save_appendix_A6_heatmap(base_stats, instruct_stats, out_dir, num_sample=None):
+def save_appendix_A6_heatmap(base_stats, instruct_stats, out_dir, num_sample=None,
+                             out_name='A6-heatmap.pdf', step2000_model='OLMo-2-0425-1B-Instruct'):
     """
     Appendix A6: 3×3 grid of NIE heatmaps.
     Rows: states conditions (full restore, MLP-window restore, Attn-window restore).
@@ -2260,9 +2237,9 @@ def save_appendix_A6_heatmap(base_stats, instruct_stats, out_dir, num_sample=Non
     # the same signed chain (see the per-checkpoint loop that builds all_ckpt_stats) --
     # both go through _to_nie below, same as A3.
     step2000_local = {}
-    for domain in PAPER_DOMAINS:
+    for domain in (PAPER_DOMAINS if step2000_model else []):
         res = load_within_model_from_local(
-            'OLMo-2-0425-1B-Instruct', 'allenai', 'step_2000', domain, num_sample)
+            step2000_model, 'allenai', 'step_2000', domain, num_sample)
         if res is not None:
             step2000_local[domain] = res
 
@@ -2352,8 +2329,9 @@ def save_appendix_A6_heatmap(base_stats, instruct_stats, out_dir, num_sample=Non
                 extent=[-0.5, matrix.shape[1] - 0.5, -0.5, num_layer - 0.5])
 
             # Vertical separator between base pre-training and instruct fine-tuning
-            ax.axvline(n_base_ckpts - 0.5, color='black', linewidth=1.5,
-                       linestyle='--', alpha=0.7)
+            if n_base_ckpts < matrix.shape[1]:
+                ax.axvline(n_base_ckpts - 0.5, color='black', linewidth=1.5,
+                           linestyle='--', alpha=0.7)
 
             ax.set_xticks(np.arange(len(labels_x)))
             ax.set_xticklabels(labels_x, rotation=45, ha='right', fontsize=A6_FS_TICK)
@@ -2382,7 +2360,7 @@ def save_appendix_A6_heatmap(base_stats, instruct_stats, out_dir, num_sample=Non
                 cb.set_label('')
 
     fig.tight_layout()
-    _savepdf(fig, os.path.join(out_dir, 'A6-heatmap.pdf'))
+    _savepdf(fig, os.path.join(out_dir, out_name))
 
 
 # ── main loop ─────────────────────────────────────────────────────────────────
@@ -2675,6 +2653,11 @@ if RUN_CROSS_PATCH:
                                 file_prefix='4panel-step2000' if is_olmo else f'4panel-{cp_family}',
                                 extra_out_dir=None if USE_PKG_RESULTS else os.path.join(PLOTS_BASE, 'main_body'),
                                 within_out_dir=_out(legacy, cp_family, 'ALP', 'within'))
+        if USE_PKG_RESULTS and 'gender' in domains_to_run:
+            import shutil
+            _f = ('4panel-step2000' if is_olmo else f'4panel-{cp_family}') + '-gender-states.pdf'
+            shutil.copy(os.path.join(_out(legacy, cp_family, 'ALP', 'cross'), _f),
+                        _paper(legacy, None if is_olmo else cp_family))
 
 # ── NPZ-based checkpoint loader (bypasses stats.json) ────────────────────────
 
@@ -2717,6 +2700,13 @@ def _load_checkpoints_from_npz(model_name, num_sample=None):
                 'peak_layer_states': int(np.argmax(res['bias_mean'])),
                 'peak_layer_mlp':    int(np.argmax(res['mlp_mean'])),
                 'peak_layer_attn':   int(np.argmax(res['attn_mean'])),
+                # signed chain, needed by the A6 NIE heatmap
+                **{k: (None if res.get(v) is None else np.asarray(res[v]).tolist())
+                   for k, v in (('states_score_signed', 'bias_mean_signed'),
+                                ('mlp_score_signed', 'mlp_mean_signed'),
+                                ('attn_score_signed', 'attn_mean_signed'))},
+                'mean_low_signed':   res.get('mean_low_signed'),
+                'effect_gap_signed': res.get('effect_gap_signed'),
             }
         entries.append(entry)
     n_loaded = sum(len(e['domains']) for e in entries)
@@ -2734,23 +2724,25 @@ if RUN_APPENDIX:
 
     for _fam in cp_families_to_run:
         print(f'\n  A1: {_fam} base + instruct bar charts (4×3)...')
-        save_appendix_A1_olmo_bars(_out(appendix_out, _fam, 'ALP', 'within'), args.num_sample,
+        save_appendix_A1_olmo_bars(_paper(appendix_out, _fam), args.num_sample,
                                    main_zf=_app_main_zf, family=_fam)
 
     print('\n  A2: Pythia bar charts (2×3)...')
-    save_appendix_A2_pythia_bars(_out(appendix_out, 'pythia', 'ALP', 'within'), args.num_sample)
+    save_appendix_A2_pythia_bars(_paper(appendix_out, 'pythia'), args.num_sample)
 
-    main_body_out = os.path.join(PLOTS_BASE, 'main_body')
-    USE_PKG_RESULTS or os.makedirs(main_body_out, exist_ok=True)
     for _fam in cp_families_to_run:
-        print(f'\n  A3: {_fam} NIE line plots...')
-        save_appendix_A3_nie_lines(_out(appendix_out, _fam, 'NIE', 'within'), args.num_sample,
+        print(f'\n  A3-1 / A3-2: {_fam}...')
+        save_appendix_A3_nie_lines(_paper(appendix_out, _fam), args.num_sample,
                                    main_zf=_app_main_zf, family=_fam)
-        print(f'\n  NIE overlay ({_fam}, gender only)...')
-        save_main_body_nie_overlay(_out(main_body_out, _fam, 'NIE', 'within'), args.num_sample,
-                                   main_zf=_app_main_zf, family=_fam)
+
+    print('\n  B: model vs model NIE, every pair...')
+    _all_models = list(cp_families_to_run) + ['pythia']
+    for _i, _fa in enumerate(_all_models):
+        for _fb in _all_models[_i + 1:]:
+            save_model_pair_nie(_paper(appendix_out, 'model_comparison'), _fa, _fb, args.num_sample)
 
     _app_main_zf.close()
+
 
     print('\n  A4: Cross-patch bar charts (4×3)...')
     for _fam in cp_families_to_run:
@@ -2769,7 +2761,7 @@ if RUN_APPENDIX:
                     _dr[_dom] = _res
             if _dr:
                 _app_cp[_dk] = _dr
-        save_appendix_A4_cross_patch_bars(_app_cp, _out(appendix_out, _fam, 'ALP', 'cross'), out_name=_fname)
+        save_appendix_A4_cross_patch_bars(_app_cp, _paper(appendix_out, _fam), out_name=_fname)
 
     print('\n  A5: Trajectory plots (1×3)...')
     _base_traj     = _load_checkpoints_from_npz('OLMo-2-0425-1B',          args.num_sample)
@@ -2779,16 +2771,25 @@ if RUN_APPENDIX:
         print('  [A5/A6] Some checkpoints are not finished yet; skipping both.')
         _base_traj = _instruct_traj = None
     if _base_traj and _instruct_traj:
-        save_appendix_A5_trajectory(_base_traj, _instruct_traj, _out(appendix_out, 'olmo_1b', 'ALP', 'trajectory'))
+        save_appendix_A5_trajectory(_base_traj, _instruct_traj, _paper(appendix_out, 'olmo_1b'))
     else:
         print('  [A5] Skipping.')
 
     print('\n  A6: NIE heatmap — layer × checkpoint (3 conditions × 3 domains)...')
     if _base_traj and _instruct_traj:
-        save_appendix_A6_heatmap(_base_traj, _instruct_traj, _out(appendix_out, 'olmo_1b', 'NIE', 'trajectory'),
-                                 args.num_sample)
+        save_appendix_A6_heatmap(_base_traj, _instruct_traj, _paper(appendix_out, 'olmo_1b'), args.num_sample)
     else:
         print('  [A6] Skipping.')
+
+    print('\n  Pythia: trajectory + NIE heatmap over its checkpoints...')
+    _pythia_traj = _load_checkpoints_from_npz('pythia-1b', args.num_sample)
+    if _all_ckpts(_pythia_traj):
+        save_appendix_A5_trajectory(_pythia_traj, [], _paper(appendix_out, 'pythia'),
+                                    out_name='A5-trajectory-pythia.pdf')
+        save_appendix_A6_heatmap(_pythia_traj, [], _paper(appendix_out, 'pythia'),
+                                 args.num_sample, out_name='A6-heatmap-pythia.pdf', step2000_model=None)
+    else:
+        print('  [Pythia A5/A6] Some checkpoints are not finished yet; skipping.')
 
 # ── cross-patch NIE overlay (within-model vs cross-patch, 4×3) ────────────────
 if RUN_CP_NIE:
@@ -2798,8 +2799,7 @@ if RUN_CP_NIE:
     cp_mb_out = os.path.join(PLOTS_BASE, 'main_body')
     USE_PKG_RESULTS or os.makedirs(cp_mb_out, exist_ok=True)
     for _fam in cp_families_to_run:
-        save_crosspatch_nie_overlay(_out(cp_nie_out, _fam, 'NIE', 'cross'), args.num_sample, family=_fam)
-        save_main_body_pre_post_crosspatch(_out(cp_mb_out, _fam, 'NIE', 'cross'), args.num_sample, family=_fam)
+        save_crosspatch_nie_overlay(_paper(cp_nie_out, _fam), args.num_sample, family=_fam)
 
 zf.close()
 print('\nDone.')

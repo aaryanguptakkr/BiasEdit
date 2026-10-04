@@ -13,6 +13,8 @@ import os
 import io
 import glob
 import functools
+import hashlib
+import pickle
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
@@ -63,10 +65,54 @@ FAMILY_PLOT_DIRS = {'olmo_1b': 'olmo2_1b', 'qwen2.5_1.5b': 'qwen2.5_1.5b',
 
 
 def plot_dir(family, score, category):
-    """new_plots/<family>/<score>/<category>/ — score: ALP (bars) or NIE (lines)."""
-    d = os.path.join(PLOTS_BASE, FAMILY_PLOT_DIRS.get(family, family), score, category)
+    """new_plots/supporting/<family>/<score>/<category>/ — score: ALP (bars) or NIE (lines)."""
+    d = os.path.join(PLOTS_BASE, 'supporting', FAMILY_PLOT_DIRS.get(family, family), score, category)
     os.makedirs(d, exist_ok=True)
     return d
+
+
+def paper_dir(family=None):
+    """new_plots/main/ (family=None) or new_plots/appendix/<family>/."""
+    d = os.path.join(PLOTS_BASE, 'main') if family is None else \
+        os.path.join(PLOTS_BASE, 'appendix', FAMILY_PLOT_DIRS.get(family, family))
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+PLOT_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.plot_cache')
+
+
+def disk_cache(cases_dir_of):
+    """Keep a loader's result on disk; reused while its cases directory is unchanged.
+
+    Reading ~150k result files over NFS took ~30 min per plotting run; the per-run
+    summaries are small, so a run is read once and every later plot reuses it.
+    """
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            d = cases_dir_of(*args, **kwargs)
+            if not os.path.isdir(d):
+                return fn(*args, **kwargs)
+            stamp = (os.stat(d).st_mtime, len(os.listdir(d)))
+            key = hashlib.sha1(repr((fn.__name__, args, sorted(kwargs.items()))).encode()).hexdigest()
+            path = os.path.join(PLOT_CACHE_DIR, key + '.pkl')
+            try:
+                with open(path, 'rb') as f:
+                    saved_stamp, result = pickle.load(f)
+                if saved_stamp == stamp:
+                    return result
+            except (OSError, EOFError, pickle.UnpicklingError):
+                pass
+            result = fn(*args, **kwargs)
+            os.makedirs(PLOT_CACHE_DIR, exist_ok=True)
+            tmp = f'{path}.{os.getpid()}.tmp'   # per process: parallel plot runs may write the same key
+            with open(tmp, 'wb') as f:
+                pickle.dump((stamp, result), f)
+            os.replace(tmp, path)
+            return result
+        return wrapper
+    return deco
 
 
 def _pkg_root(model):
