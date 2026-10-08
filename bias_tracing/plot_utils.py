@@ -290,12 +290,12 @@ def cross_patch_cases_dir(family, direction_key, domain):
 # ── style constants ───────────────────────────────────────────────────────────
 
 # Font sizes
-FS_SUPTITLE = 11   # figure-level title (suptitle)
-FS_TITLE    = 10   # panel / subplot title
-FS_LABEL    =  9   # axis labels (xlabel, ylabel)
-FS_TICK     =  8   # tick labels and x-tick rotation labels
-FS_LEGEND   =  7   # legend text
-FS_ANNOT    =  7   # small in-plot annotations (⚠ text, footnotes)
+FS_SUPTITLE = 8   # figure-level title (suptitle)
+FS_TITLE    = 9   # panel / subplot title
+FS_LABEL    =  7   # axis labels (xlabel, ylabel)
+FS_TICK     =  6   # tick labels and x-tick rotation labels
+FS_LEGEND   =  5   # legend text
+FS_ANNOT    =  5   # small in-plot annotations (⚠ text, footnotes)
 
 # Figure dimensions (inches)
 FIG_BAR_W_SINGLE   = 12.0   # width of a standalone single-domain bar chart
@@ -305,6 +305,14 @@ FIG_GRID_W_PER_COL =  7.0   # per-column width in 2-col checkpoint-grid figures
 FIG_ROW_H          =  4.0   # per-row height for all bar/line figures
 FIG_LINE_W_PER_PAN =  5.0   # per-panel width in 3-panel line plots
 FIG_TRAJ_H         = 10.0   # trajectory plot height (width is dynamic)
+
+# Appendix grids (A1-A4, A7, B): size and fonts in one place
+AP_PANEL     = (5.0, 3.8)   # inches per panel
+AP_FS_HEADER = 16           # header above a block of rows (A7)
+AP_FS_TITLE  = 13           # panel title
+AP_FS_LABEL  = 14           # axis labels
+AP_FS_TICK   = 13           # tick labels
+AP_FS_LEGEND = 13           # legend text
 
 # Colors — training phase
 BASE_COLOR     = '#1565C0'  # base pre-training (trajectory / comparison line plots)
@@ -666,9 +674,9 @@ def _draw_bars(ax, r1, r2, r3, labels, colors, num_layer, xlabel, ylabel, title,
     _fl = fs_label if fs_label is not None else FS_LABEL
     _ft = fs_title if fs_title is not None else FS_TITLE
     xs = np.arange(len(r1))
-    ax.bar(xs,                 r1, color=colors[0], width=BAR_WIDTH, edgecolor='gray', label=labels[0])
-    ax.bar(xs + BAR_WIDTH,     r2, color=colors[1], width=BAR_WIDTH, edgecolor='gray', label=labels[1])
-    ax.bar(xs + 2 * BAR_WIDTH, r3, color=colors[2], width=BAR_WIDTH, edgecolor='gray', label=labels[2])
+    ax.bar(xs,                 r1, color=colors[0], width=BAR_WIDTH, linewidth=0, label=labels[0])
+    ax.bar(xs + BAR_WIDTH,     r2, color=colors[1], width=BAR_WIDTH, linewidth=0, label=labels[1])
+    ax.bar(xs + 2 * BAR_WIDTH, r3, color=colors[2], width=BAR_WIDTH, linewidth=0, label=labels[2])
     ax.set_xlabel(xlabel, fontweight='bold', fontsize=_fl)
     ax.set_xticks(np.arange(0, num_layer, max(1, num_layer // 8)))
     ax.set_ylabel(ylabel, fontsize=_fl)
