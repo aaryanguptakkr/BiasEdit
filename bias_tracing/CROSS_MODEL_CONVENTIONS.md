@@ -16,7 +16,7 @@ new models get additive branches; every convention follows established practice.
 | Llama-3.2-1B (+Instruct) | BOS at position 0 | tokenizer auto-adds `<\|begin_of_text\|>` |
 | gemma-3-1b-pt / -it | BOS at position 0 (required) | tokenizer auto-adds `<bos>` |
 | (existing) OLMo | manual prepend | unchanged |
-| (existing) Pythia | nothing (same class as Qwen) | unchanged |
+| (existing) Pythia | manual prepend (`<\|endoftext\|>`, as OLMo) | unchanged |
 
 Evidence:
 - TransformerLens `loading_from_pretrained.py` hardcodes `default_prepend_bos=False` for
@@ -35,8 +35,10 @@ preceding logits for its first token and is explicitly skipped.
 
 Paper caveat (cite Sun et al., "Massive Activations in LLMs", COLM 2024, App. A.3):
 attention-sink "massive activations" concentrate on the first token in a
-model-family-dependent way and can shift onto BOS; position 0 is excluded from corruption
-and scoring in all conditions.
+model-family-dependent way and can shift onto BOS. Position 0 is never scored. For OLMo, Pythia,
+Llama and Gemma it is the start token and is never corrupted; for Qwen it is the sentence's first
+word, which is the subject (and is corrupted) in 174/684 gender, 920/1036 race and 45/556
+profession cases (checked 2026-11-03 on the Qwen2.5-1.5B result files).
 
 ### 2. Locating the StereoSet BLANK — empirical length-difference, no placeholder token
 

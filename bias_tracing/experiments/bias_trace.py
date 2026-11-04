@@ -25,15 +25,14 @@ from transformers import (
 from dsets import StereoSetDataset
 from util import nethook
 
-# Three readings of the same forward passes. `scores`/`high_score`/`low_score` hold the
-# FIRST one, so those keys mean exactly what they mean in every pre-2026-08 result file.
-SCORE_METRIC        = "sentence_abs_logprob_diff_v1"      # |stereo - anti|, whole sentence  <- reported metric
-SCORE_METRIC_SIGNED = "sentence_signed_logprob_diff_v1"   # stereo - anti, whole sentence; abs() of it == SCORE_METRIC
-SCORE_METRIC_BLANK  = "blank_signed_logprob_diff_v1"      # stereo - anti, BLANK tokens only
+# Three readings of the same forward passes. The paper uses the SIGNED one (LPD): effect gap,
+# NIE and the W1/JSD distances are all computed on it. `scores`/`high_score`/`low_score` keep the
+# absolute value (abs. LPD) under their pre-2026-08 key names, so old result files still load.
+SCORE_METRIC        = "sentence_abs_logprob_diff_v1"      # |stereo - anti|, whole sentence (abs. LPD)
+SCORE_METRIC_SIGNED = "sentence_signed_logprob_diff_v1"   # stereo - anti, whole sentence (LPD)
+SCORE_METRIC_BLANK  = "blank_signed_logprob_diff_v1"      # stereo - anti, BLANK tokens only (not used)
 
-# Keep the two chains apart: an NIE must take its scores, high and low from ONE of them.
-# Absolute answers "how much differentiation is restored", signed answers "is the same
-# direction restored". Mixing them produces a meaningless number.
+# Keep the chains apart: an NIE must take its scores, high and low from ONE of them.
 
 
 def acquire_run_lock(result_dir):
@@ -307,7 +306,7 @@ def main():
             targ_stereo = inp_stereo["labels"]
             base_score_blank = causal_difference(pred_anti, targ_anti, pred_stereo, targ_stereo)
             base_score_signed = causal_difference(pred_anti, sl_anti, pred_stereo, sl_stereo)
-            base_score = torch.abs(base_score_signed)          # reported metric
+            base_score = torch.abs(base_score_signed)
             print(base_score, base_score_signed, base_score_blank)
         
         # Preference after corrupting the subject embeddings.
@@ -341,7 +340,7 @@ def main():
         # Corrupted target-model preference, corrupted rows only (all three readings).
         low_score_blank = causal_difference(pred_anti[1:], targ_anti[1:], pred_stereo[1:], targ_stereo[1:])
         low_score_signed = causal_difference(pred_anti[1:], sl_anti[1:], pred_stereo[1:], sl_stereo[1:])
-        low_score = torch.abs(low_score_signed)             # reported metric
+        low_score = torch.abs(low_score_signed)
 
         for kind in None, "mlp", "attn":
             print(f"Causal Tracing for {known_id} {kind} ==========================================================")
@@ -415,16 +414,16 @@ def main():
                 if not result:
                     print(f"Skipping {knowledge['id']}")
                     continue
-                # reported chain (absolute) — same meaning as every pre-2026-08 result file
+                # absolute chain (abs. LPD), kept under the pre-2026-08 key names
                 result["high_score"] = base_score
                 result["low_score"] = low_score
-                # signed chain — direction of restoration; abs() of these gives the chain above
+                # signed chain (LPD): the effect gap and NIE in the paper use these
                 result["high_score_signed"] = base_score_signed
                 result["low_score_signed"] = low_score_signed
                 # BLANK-only chain (fill word alone); undefined when the BLANK precedes the subject
                 result["high_score_blank"] = base_score_blank
                 result["low_score_blank"] = low_score_blank
-                # PER-CASE NIE, for the per-case heatmap PDF only. NOT a reportable quantity:
+                # PER-CASE NIE on the absolute chain, for the per-case heatmap PDF only. NOT reported:
                 # each case divides by its own gap, which is <=0 for ~40% of cases and near zero
                 # for many more (std 2.1, range -7.5..+17). Aggregate first, then divide instead.
                 result["nie_percase_diagnostic"] = normalized_indirect_effect(
@@ -587,6 +586,8 @@ def _logits(x):
     return x if not hasattr(x, "logits") else x.logits
 
 def causal_difference(pred_anti, targ_anti, pred_stereo, targ_stereo):
+    """Signed LPD: per row, the mean log-probability of the scored tokens; rows (noise draws) are
+    averaged, then anti is subtracted from stereo."""
     if pred_anti.dim() == 3 and pred_stereo.dim() == 3:  # Dealing with sequences
         pred_anti = pred_anti[:, :-1]  # Remove last prediction in sequence
         targ_anti = targ_anti[:, 1:]  # Shift to align predictions and targets
@@ -669,7 +670,7 @@ def calculate_hidden_flow(
     differences = differences.detach().cpu()                            #(seq_len, num_layers)
     differences_sentence = differences_sentence.detach().cpu()
     return dict(
-        scores=torch.abs(differences_sentence),   # reported metric, legacy-compatible
+        scores=torch.abs(differences_sentence),   # abs. LPD, legacy key
         scores_signed=differences_sentence,
         scores_blank=differences,
         score_metric=SCORE_METRIC,

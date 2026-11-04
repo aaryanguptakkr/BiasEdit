@@ -95,7 +95,7 @@ def disk_cache(cases_dir_of):
             if not os.path.isdir(d):
                 return fn(*args, **kwargs)
             stamp = (os.stat(d).st_mtime, len(os.listdir(d)))
-            key = hashlib.sha1(repr((fn.__name__, args, sorted(kwargs.items()))).encode()).hexdigest()
+            key = hashlib.sha1(repr((fn.__name__, args, sorted(kwargs.items()), 2)).encode()).hexdigest()   # 2: result dicts carry pre-target window NIE
             path = os.path.join(PLOT_CACHE_DIR, key + '.pkl')
             try:
                 with open(path, 'rb') as f:
@@ -218,7 +218,7 @@ CROSS_PATCH_LOCAL_BASE = f'{LOCAL_BASE}/cross_patch'   # older runs written into
 
 CROSS_PATCH_FAMILIES = {
     'olmo_1b': {
-        'label': 'OLMo-2 1B',
+        'label': 'OLMo 2 1B',
         'base_model': 'allenai/OLMo-2-0425-1B',
         'instruct_model': 'allenai/OLMo-2-0425-1B-Instruct',
     },
@@ -228,19 +228,18 @@ CROSS_PATCH_FAMILIES = {
         'instruct_model': 'Qwen/Qwen2.5-1.5B-Instruct',
     },
     'llama3.2_1b': {
-        'label': 'Llama-3.2 1B',
+        'label': 'Llama 3.2 1B',
         'base_model': 'meta-llama/Llama-3.2-1B',
         'instruct_model': 'meta-llama/Llama-3.2-1B-Instruct',
     },
     'gemma3_1b': {
-        'label': 'Gemma-3 1B',
+        'label': 'Gemma 3 1B',
         'base_model': 'google/gemma-3-1b-pt',
         'instruct_model': 'google/gemma-3-1b-it',
     },
 }
 
-# 'dir' is the olmo_1b run directory — kept for existing scripts (table.py,
-# regenerate_compare_plots.py) that predate the multi-family layout.
+# 'dir' is the olmo_1b run directory, from before the multi-family layout.
 CROSS_PATCH_CONFIGS = {
     'pre_to_post': {
         'dir':   'olmo_1b_pre_to_post',
@@ -291,7 +290,7 @@ def cross_patch_cases_dir(family, direction_key, domain):
 
 # Font sizes
 FS_SUPTITLE = 8   # figure-level title (suptitle)
-FS_TITLE    = 9   # panel / subplot title
+FS_TITLE    = 11   # panel / subplot title
 FS_LABEL    =  7   # axis labels (xlabel, ylabel)
 FS_TICK     =  6   # tick labels and x-tick rotation labels
 FS_LEGEND   =  5   # legend text
@@ -306,13 +305,49 @@ FIG_ROW_H          =  4.0   # per-row height for all bar/line figures
 FIG_LINE_W_PER_PAN =  5.0   # per-panel width in 3-panel line plots
 FIG_TRAJ_H         = 10.0   # trajectory plot height (width is dynamic)
 
-# Appendix grids (A1-A4, A7, B): size and fonts in one place
-AP_PANEL     = (5.0, 3.8)   # inches per panel
-AP_FS_HEADER = 16           # header above a block of rows (A7)
-AP_FS_TITLE  = 13           # panel title
-AP_FS_LABEL  = 14           # axis labels
-AP_FS_TICK   = 13           # tick labels
-AP_FS_LEGEND = 13           # legend text
+# ── paper figures (main body and appendix): one style, set only here ────────────
+# Every paper figure is drawn PAPER_WIDTH inches wide (PAPER_COL_WIDTH for a single-column figure) and is
+# scaled to the page width, so text prints at the same size in every figure. Panel width follows from the
+# number of columns and panel height from PAPER_PANEL_ASPECT. Figures have no titles: the caption carries
+# them, and a panel is labelled only by a letter and its domain or model, e.g. "(a) Gender".
+PAPER_WIDTH        = 13.0   # inches, full-width figure
+PAPER_COL_WIDTH    = 6.2    # inches, single-column figure
+PAPER_PANEL_ASPECT = 0.78   # panel height / panel width
+PAPER_COL_ASPECT   = 0.42   # panel height / width for a single-column figure
+PAPER_ROW_H        = 2.5    # inches, panel height of one-row full-width figures (one panel per model)
+PAPER_TRAJ_ROW_H   = 3.0    # inches, panel height of the effect-gap-over-training figures (one row per domain)
+PAPER_LEGEND_ROW_H = 0.42   # inches per legend row below the panels
+PAPER_FS_TITLE     = 15     # panel label
+PAPER_FS_LABEL     = 14     # axis labels
+PAPER_FS_TICK      = 13     # tick labels
+PAPER_FS_LEGEND    = 11     # legend text
+
+# Notation shared by all paper figures. Line plots: colour = token position or patched activation,
+# line style = which model / which kind of patching; every legend entry names both.
+# One run code for every line figure: Pre solid/circle, Post dashed/square, Pre->Post dotted/triangle,
+# Post->Pre dash-dot/diamond. Colour encodes the token or sublayer.
+LABEL_PRE      = 'Pre'
+LABEL_POST     = 'Post'
+LABEL_P2POST   = 'Pre$\\to$Post'
+LABEL_POST2PRE = 'Post$\\to$Pre'
+LABEL_WITHIN = 'within-model'
+LABEL_CROSS  = 'cross-model'
+STYLE_PRE      = ('-', 'o')
+STYLE_POST     = ('--', 's')
+STYLE_P2POST   = (':', '^')
+STYLE_POST2PRE = ('-.', 'D')
+STYLE_FIRST, STYLE_SECOND = STYLE_PRE, STYLE_POST
+REF_CLEAN    = dict(color='black', linestyle='--', linewidth=1.2)   # clean level in LPD bar charts
+REF_CORRUPT  = dict(color='black', linestyle=':', linewidth=1.4)    # corrupted level in LPD bar charts
+TABLES_DIR   = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tables')   # scripts/tables.py output
+
+# Tick labels for training checkpoints: step, then stage or tokens seen (keys are the checkpoint labels).
+CKPT_TICKS = {
+    '0B': '0\n0B', '21B': '10k\n21B', '315B': '150k\n315B', '2.4T': '1.14M\n2.4T', '4T': '1.91M\n4T',
+    's2-3B': '1k\nMid', 's2-24B': '11k\nMid', 's2-51B': '23.9k\nMid', 'main': 'main',
+    'step200': '200\nPost', 'step1400': '1.4k\nPost', 'step2000': '2k\nPost', 'step2600': '2.6k\nPost',
+    'step0': '0', 'step1k': '1k', 'step5k': '5k', 'step81k': '81k', 'step137k': '137k', 'step143k': '143k',
+}
 
 # Colors — training phase
 BASE_COLOR     = '#1565C0'  # base pre-training (trajectory / comparison line plots)
@@ -331,8 +366,8 @@ BAR_WIDTH = 0.25
 BIAS_TYPES    = ['gender', 'profession', 'race', 'religion']
 PAPER_DOMAINS = ['gender', 'race', 'profession']  # domains used in paper figures (no religion)
 
-# Display heuristic (not a statistical test): panels whose effect_gap falls below
-# this get a ⚠ marker, because NIE divides by the gap and small gaps blow the
+# Display heuristic (not a statistical test), applied to the absolute signed effect gap
+# |clean - corrupted LPD|, as in the paper: panels whose |effect gap| falls below this get a ⚠ marker, because NIE divides by the gap and small gaps blow the
 # ratio far outside its interpretable [0, 1] range. Measured over the 68
 # (model, checkpoint, domain) entries in plots/*/stats.json: gap ≈ 0.12 → max|NIE|
 # 0.24–0.56, whereas gap = 0.0056 → 9.98 and gap = 0.0142 → 4.12. The cut is a
@@ -376,23 +411,16 @@ def signed_gap_reliable(effect_gap_signed, low_signal=LOW_SIGNAL):
 # their data comes from, and "severed" is ROME's term for a different experiment entirely —
 # holding a sublayer frozen at its corrupted value while a single state is restored
 # (ROME §2.2 / Fig. 3 -- an experiment this pipeline does not run).
-STATES_LABELS = [
-    'Effect of single state',
-    'Effect of MLP window restore',
-    'Effect of Attn window restore',
-]
-WORDS_LABELS = [
-    'Effect of subject token',     # bias_mean       — subject (bias attribute) token positions
-    'Effect of pre-target token',  # pre_blank_mean  — token before the prediction target
-    'Effect of target token',      # blank_mean      — prediction target token positions
-]
+STATES_LABELS = ['Single state', 'MLP window', 'Attn window']
+WORDS_LABELS = ['Subject token', 'Pre-target token', 'Target token']   # bias_mean, pre_blank_mean, blank_mean
 
 # Standardized bar colors: blue (single-state restore), red (MLP window restore), green (Attn window restore)
 BAR_COLORS    = ['#1f77b4', '#d62728', '#2ca02c']  # states bars
+DOMAIN_COLORS = dict(zip(['gender', 'profession', 'race'], BAR_COLORS))   # bias types, same palette as the bar legends
 STATES_COLORS = BAR_COLORS                          # alias used in appendix grids
 WORDS_COLORS  = ['#9467bd', '#ff7f0e', '#17becf']  # distinct palette for words bars
 
-Y_LABEL_BARS = 'Abs. log prob diff (stereo − anti)'
+Y_LABEL_BARS = 'abs. LPD'
 Y_LABEL_NIE  = 'NIE (normalized indirect effect)'
 
 
@@ -597,13 +625,27 @@ def validate_score_files(file_lists, loader, expected=None):
     return reference
 
 
+def case_rows(d, signed=False):
+    """One case's (n_layers,) rows at the subject, pre-target and target positions
+    (subject/pre-target None if absent), plus its clean and corrupted scores."""
+    suffix = '_signed' if signed else ''
+    scores = d['scores' + suffix]
+    rows = [scores[b:e] for b, e in d['corrupt_range_anti']]
+    subj = np.mean(np.concatenate(rows, axis=0), axis=0) if rows else None
+    idx0 = int(d['blank_idxs_anti'][0])
+    idx1 = int(d['blank_idxs_anti'][1]) if len(d['blank_idxs_anti']) > 1 else idx0 + 1
+    pre = scores[idx0 - 1] if idx0 > 0 else None
+    tgt = np.mean(scores[idx0:idx1], axis=0)
+    return subj, pre, tgt, float(d['high_score' + suffix]), float(d['low_score' + suffix])
+
+
 def collect_scores(file_list, loader, signed=False):
     """
     Aggregate indirect-effect scores across sentence pairs.
 
-    signed=False (default): the abs whole-sentence metric -- ALP, "where does bias exist".
-    signed=True: the signed whole-sentence metric -- feed this into normalized_indirect_effect
-      for NIE, "how much does restoring/corrupting a state move the model's own preference".
+    signed=False (default): abs. LPD, for the bar figures (no longer in the paper).
+    signed=True: signed LPD -- feed this into normalized_indirect_effect for NIE and the effect
+      gap, as in the paper.
       Pooling is over raw signed values, no per-case sign-alignment: a domain whose cases are
       genuinely split between stereotype- and anti-stereotype-preferring will show that as a
       small pooled mean_high/mean_low, which is a real finding ("this domain isn't uniformly
@@ -628,25 +670,18 @@ def collect_scores(file_list, loader, signed=False):
       mean_low       float  mean corrupted-run log prob diff (abs, or signed if signed=True)
     Returns (None, None, None, 0, 0.0, 0.0) on failure.
     """
-    score_key = 'scores_signed' if signed else 'scores'
-    high_key  = 'high_score_signed' if signed else 'high_score'
-    low_key   = 'low_score_signed' if signed else 'low_score'
     bias_word, pre_blank, blank = [], [], []
     highs, lows = [], []
     for item in tqdm(file_list, leave=False):
         try:
-            d = loader(item)
-            scores = d[score_key]
-            case_bias_rows = [scores[b:e] for b, e in d['corrupt_range_anti']]
-            if case_bias_rows:
-                bias_word.append(np.mean(np.concatenate(case_bias_rows, axis=0), axis=0))
-            idx0 = int(d['blank_idxs_anti'][0])
-            idx1 = int(d['blank_idxs_anti'][1]) if len(d['blank_idxs_anti']) > 1 else idx0 + 1
-            if idx0 > 0:
-                pre_blank.append(scores[idx0 - 1])
-            blank.append(np.mean(scores[idx0:idx1], axis=0))
-            highs.append(float(d[high_key]))
-            lows.append(float(d[low_key]))
+            subj, pre, tgt, high, low = case_rows(loader(item), signed)
+            if subj is not None:
+                bias_word.append(subj)
+            if pre is not None:
+                pre_blank.append(pre)
+            blank.append(tgt)
+            highs.append(high)
+            lows.append(low)
         except Exception as exc:
             print(f'    [collect_scores] Skipping {item}: {exc}')
             continue

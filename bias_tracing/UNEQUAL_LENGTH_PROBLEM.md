@@ -1,5 +1,9 @@
 # The unequal-token-length problem
 
+> **Historical document.** Written before the paper switched to signed LPD (effect gap, NIE and
+> W1/JSD on signed LPD; abs. LPD only for the clean run). Formulas, metric names and numbers here may
+> be out of date; current definitions are in `PIPELINE_STATE.md` §4.
+
 Why 16–44 % of StereoSet cases never enter our causal traces, why that cannot be fixed by
 better indexing, and what it means for the paper.
 

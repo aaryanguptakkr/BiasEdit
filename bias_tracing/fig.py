@@ -83,7 +83,11 @@ from plot_utils import (
     STATES_LABELS, WORDS_LABELS, BAR_COLORS, STATES_COLORS, WORDS_COLORS,
     LOW_SIGNAL, Y_LABEL_BARS, Y_LABEL_NIE, FAMILY_PLOT_DIRS,
     FS_SUPTITLE, FS_TITLE, FS_LABEL, FS_TICK, FS_LEGEND, FS_ANNOT,
-    AP_PANEL, AP_FS_HEADER, AP_FS_TITLE, AP_FS_LABEL, AP_FS_TICK, AP_FS_LEGEND,
+    PAPER_WIDTH, PAPER_COL_WIDTH, PAPER_PANEL_ASPECT, PAPER_COL_ASPECT, PAPER_LEGEND_ROW_H,
+    PAPER_FS_TITLE, PAPER_FS_LABEL, PAPER_FS_TICK, PAPER_FS_LEGEND,
+    LABEL_PRE, LABEL_POST, LABEL_WITHIN, LABEL_CROSS, STYLE_FIRST, STYLE_SECOND, LABEL_P2POST, LABEL_POST2PRE,
+    STYLE_PRE, STYLE_POST, STYLE_P2POST, STYLE_POST2PRE, CKPT_TICKS,
+    PAPER_ROW_H, PAPER_TRAJ_ROW_H, DOMAIN_COLORS, REF_CLEAN, REF_CORRUPT, TABLES_DIR,
     FIG_BAR_W_SINGLE, FIG_BAR_H_SINGLE, FIG_BAR_W_PER_COL,
     FIG_GRID_W_PER_COL, FIG_ROW_H, FIG_LINE_W_PER_PAN, FIG_TRAJ_H,
     BASE_COLOR, INSTRUCT_COLOR, LOW_SIG_COLOR, LOW_SIG_BG,
@@ -95,7 +99,7 @@ from plot_utils import (
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
-PLOT_CHOICES = ['bars', 'delta', 'compare', 'cross_patch', 'appendix', 'cp_nie']
+PLOT_CHOICES = ['bars', 'delta', 'compare', 'cross_patch', 'appendix', 'cp_nie', 'main']
 
 parser = argparse.ArgumentParser(
     formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -146,6 +150,7 @@ RUN_COMPARE     = 'compare'     in _plots
 RUN_CROSS_PATCH = 'cross_patch' in _plots
 RUN_APPENDIX    = 'appendix'    in _plots
 RUN_CP_NIE      = 'cp_nie'      in _plots
+RUN_MAIN        = 'main'        in _plots
 
 models_to_run      = [args.model]     if args.model     else list(MODEL_CONFIGS.keys())
 domains_to_run     = [args.bias]      if args.bias       else BIAS_TYPES
@@ -349,7 +354,7 @@ def save_stats_and_report(model_name, all_ckpt_stats, out_dir):
             if s is None:
                 lines.append(f'| {e["label"]} | {domain} | — | — | — | — | — | — | — | — |')
                 continue
-            gap  = s['effect_gap']          # abs chain -- low-signal flag stays on magnitude
+            gap  = s['effect_gap']          # abs chain, for this report only; the paper flags on the signed gap
             flag = ' ⚠' if gap < LOW_SIGNAL else ''
             nl   = s['num_layers']
             mid  = nl // 2
@@ -437,9 +442,6 @@ def save_stats_and_report(model_name, all_ckpt_stats, out_dir):
     print(f'  Saved: {md_path}')
 
 # ── cross-model plot helpers ──────────────────────────────────────────────────
-
-DOMAIN_COLORS = {'gender': '#2196F3', 'profession': '#4CAF50',
-                 'race': '#FF5722', 'religion': '#9C27B0'}
 
 def save_bias_delta(ckpt_stats_list, model_name, out_dir):
     """
@@ -534,7 +536,7 @@ def save_bias_trajectory(base_stats, instruct_stats, out_dir):
     """
     How bias strength evolves across both training phases on a single timeline.
     Three panels:
-      1. Effect gap (high − low) — overall bias strength, raw abs log prob diff units.
+      1. Effect gap (high − low) on the abs chain (supporting plot; the paper's A5 uses the signed gap).
       2. Embedding layer contribution — fraction of effect gap recovered at L0
          = (states_score_signed[0] − mean_low_signed) / effect_gap_signed. Signed chain, so a
          checkpoint whose L0 restoration pushes toward the anti-stereotype shows as negative
@@ -771,8 +773,8 @@ def _finalize_result_dict(single_items, attn_items, mlp_items, loader, num_layer
 
     bias_mean_s, pre_blank_mean_s, blank_mean_s, _, mean_high_s, mean_low_s = \
         collect_scores(single_items, loader, signed=True)
-    attn_mean_s, _, _, _, _, _ = collect_scores(attn_items, loader, signed=True)
-    mlp_mean_s,  _, _, _, _, _ = collect_scores(mlp_items,  loader, signed=True)
+    attn_mean_s, attn_pre_s, _, _, _, _ = collect_scores(attn_items, loader, signed=True)
+    mlp_mean_s,  mlp_pre_s,  _, _, _, _ = collect_scores(mlp_items,  loader, signed=True)
     have_signed = bias_mean_s is not None
 
     zero           = np.zeros(num_layer)
@@ -802,6 +804,8 @@ def _finalize_result_dict(single_items, attn_items, mlp_items, loader, num_layer
         'pre_blank_mean_signed': pre_blank_mean_s if have_signed else None,
         'blank_mean_signed':     blank_mean_s     if have_signed else None,
         'attn_mean_signed':      attn_mean_s      if have_signed else None,
+        'attn_pre_signed':       attn_pre_s       if have_signed else None,
+        'mlp_pre_signed':        mlp_pre_s        if have_signed else None,
         'mlp_mean_signed':       mlp_mean_s       if have_signed else None,
         'mean_high_signed':      mean_high_s      if have_signed else None,
         'mean_low_signed':       mean_low_s       if have_signed else None,
@@ -901,7 +905,7 @@ def save_cross_patch_direction(direction_key, domain_results, out_dir, family_la
 
     def _low_sig_decorate(ax, res):
         """Add ⚠ annotation and background tint for low-signal panels."""
-        if res['low_sig']:
+        if _low_sig(res):
             ax.set_facecolor(LOW_SIG_BG)
             ax.text(0.98, 0.97, '⚠ low-signal', transform=ax.transAxes,
                     fontsize=FS_ANNOT, ha='right', va='top', color=LOW_SIG_COLOR)
@@ -909,7 +913,7 @@ def save_cross_patch_direction(direction_key, domain_results, out_dir, family_la
     # ── individual PDFs per domain ────────────────────────────────────────────
     for domain, res in domain_results.items():
         nl       = res['num_layer']
-        sig_flag = ' [low-signal]' if res['low_sig'] else ''
+        sig_flag = ' [low-signal]' if _low_sig(res) else ''
 
         for plot_type, r2, r3, labels_list in [
             ('states', res['mlp_mean'],       res['attn_mean'],  STATES_LABELS),
@@ -1008,7 +1012,7 @@ def save_cross_patch_comparison(all_direction_results, domains, out_dir, family_
                 else:
                     r2, r3 = res['pre_blank_mean'], res['blank_mean']
                 subplots.append((dir_label, res['bias_mean'], r2, r3,
-                                 res['num_layer'], res['low_sig']))
+                                 res['num_layer'], _low_sig(res)))
 
             if not subplots:
                 continue
@@ -1210,7 +1214,7 @@ def save_cross_patch_4panel(within_model_panels, all_direction_results, domains,
         ax.set_xlabel('Layer', fontsize=FS_LABEL+5, fontweight='bold')
         ax.set_ylim(y_min, y_max)
         ax.axhline(0, color='black', linewidth=0.8, linestyle='--', zorder=0)
-        if res['low_sig']:
+        if _low_sig(res):
             ax.set_facecolor(LOW_SIG_BG)
             ax.text(0.98, 0.97, '⚠ low-signal', transform=ax.transAxes,
                     fontsize=FS_ANNOT, ha='right', va='top', color=LOW_SIG_COLOR)
@@ -1397,8 +1401,38 @@ def _n_layers(*results):
     return max((r['num_layer'] for r in results if r), default=16)
 
 
-def _layer_ticks(n):
-    return np.arange(0, n, max(1, n // 8))
+def _layer_ticks(n, n_ticks=8):
+    return np.arange(0, n, max(1, n // n_ticks))
+
+
+# ── paper figures: shared layout (all sizes and fonts come from plot_utils) ───
+
+def _paper_fig(n_rows, n_cols, legend_rows=1, width=PAPER_WIDTH, row_h=None):
+    """Paper figure of n_rows x n_cols panels at the common print scale, with room for a legend below.
+    row_h fixes the panel height (one-row main-body figures); otherwise it follows the panel aspect."""
+    aspect = PAPER_COL_ASPECT if width == PAPER_COL_WIDTH else PAPER_PANEL_ASPECT
+    height = n_rows * (row_h or (width / n_cols) * aspect) + legend_rows * PAPER_LEGEND_ROW_H + 0.3
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(width, height), squeeze=False)
+    return fig, axes
+
+
+def _paper_legend(fig, handles, ncol):
+    """One legend below all panels; then fit the panels above it."""
+    leg = fig.legend(handles=handles, loc='lower center', ncol=ncol, fontsize=PAPER_FS_LEGEND, frameon=True,
+                     handlelength=2.2, columnspacing=1.4)
+    fig.canvas.draw()   # reserve exactly the legend's height, so no blank band is left above it
+    leg_h = leg.get_window_extent(fig.canvas.get_renderer()).height / fig.dpi
+    fig.tight_layout(rect=[0, (leg_h + 0.08) / fig.get_figheight(), 1, 1])
+
+
+def _panel(ax, title, n_lay=None, ylabel='', n_cols=3):
+    """Panel label, axis labels and ticks in the paper style."""
+    ax.set_title(title, fontsize=PAPER_FS_TITLE)
+    ax.set_xlabel('Layer', fontsize=PAPER_FS_LABEL)
+    ax.set_ylabel(ylabel, fontsize=PAPER_FS_LABEL)
+    if n_lay:
+        ax.set_xticks(_layer_ticks(n_lay, 4 if n_cols >= 4 else 8))
+    ax.tick_params(labelsize=PAPER_FS_TICK)
 
 
 # ── appendix grid helpers ─────────────────────────────────────────────────────
@@ -1421,71 +1455,53 @@ def _row_ylim(results_dict, paper_domains, *keys):
     return float(flat.min()) - margin, float(flat.max()) + margin
 
 
-def _bars_grid(axes, row_specs, paper_domains, row_ylims, letter_start=0):
-    """
-    Fill a rows×cols axes grid with labelled bar charts.
-
-    axes         : 2-D numpy array of Axes, shape (n_rows, len(paper_domains))
-    row_specs    : list of (results_dict, plot_type, bar_colors, model_label, type_label)
-      plot_type  : 'states' or 'words'
-      bar_colors : 3-element list of colors for the three bars
-    paper_domains : ordered list of domain strings
-    row_ylims    : list of (y_min, y_max) per row; None entries mean auto-scale
-    """
-    alphabet   = 'abcdefghijklmnopqrstuvwxyz'
-    letter_idx = letter_start
-
-    for row, (results_dict, plot_type, bar_colors, model_label, type_label) in enumerate(row_specs):
-        y_min_r, y_max_r = row_ylims[row] if row_ylims is not None else (None, None)
+def _bars_grid(axes, row_specs, paper_domains, signed=False):
+    """Bar charts on a rows x domains grid. row_specs: (results_by_domain, 'states' | 'words') per row.
+    signed=False: ALP; signed=True: LPD, with the clean and corrupted levels as reference lines.
+    Panels are labelled "(a) Gender"; what each row shows goes in the caption."""
+    letter = 0
+    for row, (results_dict, plot_type) in enumerate(row_specs):
+        colors, labels = (STATES_COLORS, STATES_LABELS) if plot_type == 'states' else (WORDS_COLORS, WORDS_LABELS)
         for col, domain in enumerate(paper_domains):
-            ax     = axes[row, col]
-            res    = results_dict.get(domain)
-            letter = alphabet[letter_idx]
-            letter_idx += 1
-            title  = f'({letter}) {domain.capitalize()} bias {type_label}\n({model_label})'
-
+            ax, res = axes[row, col], results_dict.get(domain)
+            title = f'({"abcdefghijklmnopqrstuvwxyz"[letter]}) {domain.capitalize()}'
+            letter += 1
             if res is None:
                 ax.set_visible(False)
                 continue
-
-            if plot_type == 'states':
-                r1, r2, r3  = res['bias_mean'], res['mlp_mean'], res['attn_mean']
-                labels_list = STATES_LABELS
-            else:
-                r1, r2, r3  = res['bias_mean'], res['pre_blank_mean'], res['blank_mean']
-                labels_list = WORDS_LABELS
-
-            _draw_bars(ax, r1, r2, r3, labels_list, bar_colors, res['num_layer'],
-                       'Layer', Y_LABEL_BARS if col == 0 else '', title,
-                       fs_label=AP_FS_LABEL, fs_tick=AP_FS_TICK, fs_title=AP_FS_TITLE)
-
-            if y_min_r is not None:
-                ax.set_ylim(y_min_r, y_max_r)
-
+            keys = ('bias_mean', 'mlp_mean', 'attn_mean') if plot_type == 'states' else \
+                   ('bias_mean', 'pre_blank_mean', 'blank_mean')
+            sfx = '_signed' if signed else ''
+            _draw_bars(ax, *(res[k + sfx] for k in keys), labels, colors, res['num_layer'], 'Layer', '', title)
+            _panel(ax, title, res['num_layer'], ('LPD' if signed else Y_LABEL_BARS) if col == 0 else '')
+            if signed:
+                ax.axhline(res['mean_high_signed'], **REF_CLEAN)
+                ax.axhline(res['mean_low_signed'], **REF_CORRUPT)
             ax.axhline(0, color='black', linewidth=0.6, linestyle='--', alpha=0.4, zorder=0)
-            leg = ax.get_legend()
-            if leg:
-                leg.remove()
-
-            if res['low_sig']:
-                ax.set_facecolor(LOW_SIG_BG)
-                ax.text(0.98, 0.97, '⚠', transform=ax.transAxes,
-                        fontsize=FS_ANNOT, ha='right', va='top', color=LOW_SIG_COLOR)
+            if ax.get_legend():
+                ax.get_legend().remove()
+            if _low_sig(res):
+                _mark_low_sig(ax)
 
 
-def _states_words_legend(fig, bottom_frac=0.10):
-    """
-    Single centered legend with 2 rows: States (row 1) + Words (row 2), ncol=3.
-    States bars use STATES_COLORS; words bars use WORDS_COLORS.
-    """
-    patches = (
-        [Patch(facecolor=STATES_COLORS[i], edgecolor='gray', label=STATES_LABELS[i])
-         for i in range(3)] +
-        [Patch(facecolor=WORDS_COLORS[i],  edgecolor='gray', label=WORDS_LABELS[i])
-         for i in range(3)]
-    )
-    fig.legend(handles=patches, loc='lower center', bbox_to_anchor=(0.5, 0.0),
-               ncol=3, fontsize=AP_FS_LEGEND, frameon=True)
+def _bars_legend_handles(signed=False):
+    from matplotlib.lines import Line2D
+    refs = [Line2D([0], [0], label='Clean LPD', **REF_CLEAN),
+            Line2D([0], [0], label='Corrupted LPD', **REF_CORRUPT)] if signed else []
+    return ([Patch(facecolor=c, label=l) for c, l in zip(STATES_COLORS, STATES_LABELS)] +
+            [Patch(facecolor=c, label=l) for c, l in zip(WORDS_COLORS, WORDS_LABELS)] + refs + [_low_sig_handle()])
+
+
+def save_appendix_lpd_bars(out_dir, family, num_sample=None):
+    """A8: LPD counterpart of A1/A2. Rows: Base states, Base words, then Post-trained states and words when the
+    family has a post-trained model; columns: domains. Reference lines: clean and corrupted LPD."""
+    base, inst, _, i_name = _load_family_pair(family, PAPER_DOMAINS, num_sample)
+    rows = [(base, 'states'), (base, 'words')] + ([(inst, 'states'), (inst, 'words')] if i_name else [])
+    fig, axes = _paper_fig(len(rows), 3, legend_rows=3)
+    _bars_grid(axes, rows, PAPER_DOMAINS, signed=True)
+    _share_rows(axes)
+    _paper_legend(fig, _bars_legend_handles(signed=True), 3)
+    _savepdf(fig, os.path.join(out_dir, f'A8-lpd-bars-{FAMILY_PLOT_DIRS.get(family, family)}.pdf'))
 
 
 # ── appendix A1: OLMo base + instruct bars (4×3) ─────────────────────────────
@@ -1502,24 +1518,11 @@ def save_appendix_A1_olmo_bars(out_dir, num_sample=None, main_zf=None, family='o
     base_results, inst_results, b_name, i_name = _load_family_pair(
         family, PAPER_DOMAINS, num_sample, main_zf)
 
-    row_specs = [
-        (base_results, 'states', STATES_COLORS, b_name, 'effect of states'),
-        (base_results, 'words',  WORDS_COLORS,  b_name, 'effect of different words'),
-        (inst_results, 'states', STATES_COLORS, i_name, 'effect of states'),
-        (inst_results, 'words',  WORDS_COLORS,  i_name, 'effect of different words'),
-    ]
-    row_ylims = [
-        _row_ylim(base_results, PAPER_DOMAINS, 'bias_mean', 'mlp_mean', 'attn_mean'),
-        _row_ylim(base_results, PAPER_DOMAINS, 'bias_mean', 'pre_blank_mean', 'blank_mean'),
-        _row_ylim(inst_results, PAPER_DOMAINS, 'bias_mean', 'mlp_mean', 'attn_mean'),
-        _row_ylim(inst_results, PAPER_DOMAINS, 'bias_mean', 'pre_blank_mean', 'blank_mean'),
-    ]
-
-    fig, axes = plt.subplots(4, 3, figsize=(AP_PANEL[0] * 3, AP_PANEL[1] * 4 + 1.2))
-    _bars_grid(axes, row_specs, PAPER_DOMAINS, None)
+    fig, axes = _paper_fig(4, 3, legend_rows=3)
+    _bars_grid(axes, [(base_results, 'states'), (base_results, 'words'),
+                      (inst_results, 'states'), (inst_results, 'words')], PAPER_DOMAINS)
     _share_rows(axes)
-    _states_words_legend(fig)
-    fig.tight_layout(rect=[0, 0.07, 1, 1.0])
+    _paper_legend(fig, _bars_legend_handles(), 3)
     _savepdf(fig, os.path.join(out_dir, 'A1-olmo-bars.pdf' if family == 'olmo_1b'
                                else f'A1-bars-{family}.pdf'))
 
@@ -1542,32 +1545,31 @@ def save_appendix_A2_pythia_bars(out_dir, num_sample=None):
         print('  [A2] No data; skipping.')
         return
 
-    row_specs = [
-        (pythia_results, 'states', STATES_COLORS, 'pythia-1b', 'effect of states'),
-        (pythia_results, 'words',  WORDS_COLORS,  'pythia-1b', 'effect of different words'),
-    ]
-    row_ylims = [
-        _row_ylim(pythia_results, PAPER_DOMAINS, 'bias_mean', 'mlp_mean', 'attn_mean'),
-        _row_ylim(pythia_results, PAPER_DOMAINS, 'bias_mean', 'pre_blank_mean', 'blank_mean'),
-    ]
-
-    fig, axes = plt.subplots(2, 3, figsize=(AP_PANEL[0] * 3, AP_PANEL[1] * 2 + 1.2))
-    _bars_grid(axes, row_specs, PAPER_DOMAINS, None)
+    fig, axes = _paper_fig(2, 3, legend_rows=3)
+    _bars_grid(axes, [(pythia_results, 'states'), (pythia_results, 'words')], PAPER_DOMAINS)
     _share_rows(axes)
-    _states_words_legend(fig)
-    fig.tight_layout(rect=[0, 0.11, 1, 1.0])
+    _paper_legend(fig, _bars_legend_handles(), 3)
     _savepdf(fig, os.path.join(out_dir, 'A2-pythia-bars.pdf'))
 
 
 # ── appendix A3: NIE line plots (4×3) ────────────────────────────────────────
 
 _NIE_FIELDS = {'bias': 'bias_mean_signed', 'mlp': 'mlp_mean_signed', 'attn': 'attn_mean_signed',
-               'pre_blank': 'pre_blank_mean_signed', 'blank': 'blank_mean_signed'}
+               'pre_blank': 'pre_blank_mean_signed', 'blank': 'blank_mean_signed',
+               'mlp_pre': 'mlp_pre_signed', 'attn_pre': 'attn_pre_signed'}
 _NIE_ROWS = {
     'states': (('bias', 'mlp', 'attn'), ['Single state', 'MLP window', 'Attn window'], 'States NIE'),
     'words':  (('bias', 'pre_blank', 'blank'), ['Subject token', 'Pre-target token', 'Target token'], 'Words NIE'),
+    'states_pre': (('pre_blank', 'mlp_pre', 'attn_pre'), ['Single state', 'MLP window', 'Attn window'], 'Pre-target NIE'),
 }
-_LINESTYLES = (('-', 'o'), ('--', 's'))   # first model solid, second dashed
+_LINESTYLES = (STYLE_FIRST, STYLE_SECOND)   # first model solid, second dashed
+_RUN_STYLES = (STYLE_PRE, STYLE_POST, STYLE_P2POST, STYLE_POST2PRE)
+
+
+def _mevery(n, style):
+    """Sparse markers, offset per run style so overlapping curves still show distinct markers."""
+    step = max(1, n // 8)
+    return (_RUN_STYLES.index(style) % step if style in _RUN_STYLES else 0, step)
 
 
 def _nie_curve(res, key):
@@ -1580,59 +1582,72 @@ def _nie_curve(res, key):
     return normalized_indirect_effect(arr, low, gap, signed=True)
 
 
-def _nie_line_rows(axes, kinds, models, letter_start=0,
-                   fs=(AP_FS_TITLE, AP_FS_LABEL, AP_FS_TICK), show_who=True, tag_suffix=''):
-    """Draw NIE line rows. kinds: e.g. ['states', 'words']; models: [(results_by_domain, label), ...]
-    drawn solid then dashed. Returns all plotted values (for a shared y-range)."""
-    fs_title, fs_label, fs_tick = fs
-    vals, letter = [], letter_start
+def _low_sig(res):
+    """Low signal = |signed effect gap| (clean - corrupted LPD) below LOW_SIGNAL, as defined in the paper."""
+    gap = res.get('effect_gap_signed')
+    return (not signed_gap_reliable(gap)) if gap is not None else bool(res.get('low_sig'))
+
+
+def _low_sig_handle():
+    return Patch(facecolor=LOW_SIG_BG, edgecolor=LOW_SIG_COLOR, label='\u26a0 Effect gap < 0.03')
+
+
+def _mark_low_sig(ax):
+    ax.set_facecolor(LOW_SIG_BG)
+    ax.text(0.98, 0.97, '\u26a0', transform=ax.transAxes, fontsize=FS_ANNOT, ha='right', va='top',
+            color=LOW_SIG_COLOR)
+
+
+def _nie_line_rows(axes, kinds, models, letter_start=0):
+    """NIE line rows on a rows x domains grid. kinds: e.g. ['states', 'words']; models: [(results_by_domain,
+    label), ...], drawn with STYLE_FIRST, then STYLE_SECOND. Panels are labelled "(a) Gender"."""
+    letter = letter_start
     for row, kind in enumerate(kinds):
-        keys, cond_labels, tag = _NIE_ROWS[kind]
-        colors = BAR_COLORS if kind == 'states' else WORDS_COLORS
+        keys, _, _ = _NIE_ROWS[kind]
+        colors = BAR_COLORS if kind.startswith('states') else WORDS_COLORS
         for col, domain in enumerate(PAPER_DOMAINS):
-            ax = axes[row, col]
-            n_lay = 16
-            for (results, _label), (ls, mk) in zip(models, _LINESTYLES):
+            ax, n_lay = axes[row, col], 16
+            for j, entry in enumerate(models):
+                results, (ls, mk) = entry[0], (entry[2] if len(entry) > 2 else _LINESTYLES[min(j, 1)])
                 res = results.get(domain)
                 for key, color in zip(keys, colors):
                     nie = _nie_curve(res, key)
-                    if nie is None:
-                        continue
-                    n_lay = max(n_lay if res is None else res['num_layer'], len(nie))
-                    ax.plot(np.arange(len(nie)), nie, color=color, linestyle=ls, marker=mk,
-                            linewidth=2.0, markersize=3)
-                    vals.extend(nie.tolist())
-            who = ' (solid) vs\n'.join(lab for _, lab in models) + (' (dashed)' if len(models) > 1 else '')
-            ax.set_title(f'({"abcdefghijklmnopqrstuvwxyz"[letter]}) {domain.capitalize()} — {tag}{tag_suffix}'
-                         + (f'\n{who}' if show_who else ''), fontsize=fs_title)
-            letter += 1
+                    if nie is not None:
+                        n_lay = len(nie)
+                        ax.plot(np.arange(len(nie)), nie, color=color, linestyle=ls, marker=mk,
+                                markevery=_mevery(len(nie), (ls, mk)), linewidth=2.0, markersize=3.5)
+                if res is not None and _low_sig(res):
+                    _mark_low_sig(ax)
             ax.axhline(0, color='black', linewidth=0.7, alpha=0.4)
-            ax.set_xlabel('Layer', fontsize=fs_label)
-            if col == 0:
-                ax.set_ylabel('NIE', fontsize=fs_label)
-            ax.set_xticks(_layer_ticks(n_lay))
-            ax.tick_params(labelsize=fs_tick)
             ax.grid(alpha=0.2)
-    return vals
+            _panel(ax, f'({"abcdefghijklmnopqrstuvwxyz"[letter]}) {domain.capitalize()}', n_lay,
+                   'NIE' if col == 0 else '')
+            letter += 1
 
 
-def _nie_legend_handles(kinds, models):
-    """One entry per condition × model, e.g. 'Attn window: OLMo-2 base' (the line style shows which)."""
+def _nie_legend_columns(kinds, models):
+    """One legend entry per drawn line (condition colour x model line style), grouped into legend columns:
+    one column per (kind, model), or one per model when that would give more than four columns."""
     from matplotlib.lines import Line2D
-    handles = []
-    for kind in kinds:
+
+    def entries(kind, j, e):
         _, cond_labels, _ = _NIE_ROWS[kind]
-        colors = BAR_COLORS if kind == 'states' else WORDS_COLORS
-        for cond, color in zip(cond_labels, colors):
-            for (_, label), (ls, mk) in zip(models, _LINESTYLES):
-                handles.append(Line2D([0], [0], color=color, linestyle=ls, marker=mk, linewidth=2,
-                                      label=f'{cond}: {label}'))
-    return handles
+        colors = BAR_COLORS if kind.startswith('states') else WORDS_COLORS
+        ls, mk = e[2] if len(e) > 2 else _LINESTYLES[min(j, 1)]
+        return [Line2D([0], [0], color=c, linestyle=ls, marker=mk, linewidth=2, markersize=5,
+                       label=f'{cond}, {e[1]}') for cond, c in zip(cond_labels, colors)]
+
+    if len(kinds) * len(models) <= 4:
+        return [entries(k, j, e) for k in kinds for j, e in enumerate(models)]
+    return [[h for k in kinds for h in entries(k, j, e)] for j, e in enumerate(models)]
 
 
-def _nie_legend(fig, kinds, models, fontsize):
-    fig.legend(handles=_nie_legend_handles(kinds, models), loc='lower center', bbox_to_anchor=(0.5, 0.0),
-               ncol=3, fontsize=fontsize, frameon=True)
+def _nie_legend(fig, kinds, models=None, blocks=None):
+    """Legend below the panels (matplotlib fills a legend column by column)."""
+    if blocks:   # models of all blocks, each label once
+        models = list({e[1]: e for b in blocks for e in b}.values())
+    cols = _nie_legend_columns(kinds, models)
+    _paper_legend(fig, [h for c in cols for h in c], len(cols))
 
 
 def _share_rows(axes):
@@ -1649,312 +1664,251 @@ def _set_ylim(axes, vals):
 
 
 def save_appendix_A3_nie_lines(out_dir, num_sample=None, main_zf=None, family='olmo_1b'):
-    """
-    A3, two versions for one base/Instruct family (columns: gender, race, profession):
-      A3-1  2×3: NIE lines, states and words; base solid, Instruct dashed.
-      A3-2  4×3: rows 1-2 as A3-1; row 3 ALP states bars of the base model, row 4 of the Instruct model.
-    """
+    """A3 (2x3) for one Base/Post family: NIE lines, row 1 states, row 2 words; Base solid, Post dashed."""
     print(f'  [A3] Loading {family} base + instruct...')
-    base, inst, b_name, i_name = _load_family_pair(family, PAPER_DOMAINS, num_sample, main_zf)
-    lab = CROSS_PATCH_FAMILIES[family]['label']
-    models = [(base, f'{lab} base'), (inst, f'{lab} Instruct')]
+    base, inst, _, _ = _load_family_pair(family, PAPER_DOMAINS, num_sample, main_zf)
+    models = [(base, LABEL_PRE)] + ([(inst, LABEL_POST)] if inst else [])
+    fig, axes = _paper_fig(2, 3, legend_rows=2)
+    _nie_line_rows(axes, ['states', 'words'], models)
+    _share_rows(axes)
+    _nie_legend(fig, ['states', 'words'], models)
     sfx = '' if family == 'olmo_1b' else f'-{family}'
-
-    for version in (1,):   # A3-2 (with ALP bar rows) was tried and dropped
-        n_rows = 2 if version == 1 else 4
-        fig, axes = plt.subplots(n_rows, 3, figsize=(AP_PANEL[0] * 3, AP_PANEL[1] * n_rows + 2.0))
-        vals = _nie_line_rows(axes[:2], ['states', 'words'], models, show_who=False)
-        fig.suptitle(f'{lab} — Base (solid) vs Post-trained / Instruct (dashed)', fontsize=AP_FS_HEADER)
-        _share_rows(axes[:2])
-        if version == 2:
-            bar_rows = [(base, 'states', STATES_COLORS, b_name, 'ALP, effect of states'),
-                        (inst, 'states', STATES_COLORS, i_name, 'ALP, effect of states')]
-            _bars_grid(axes[2:], bar_rows, PAPER_DOMAINS, None, letter_start=6)
-            share_ylim(axes[2:])
-        _nie_legend(fig, ['states', 'words'], models, AP_FS_LEGEND)
-        if version == 2:
-            fig.legend(handles=[Patch(facecolor=STATES_COLORS[i], edgecolor='gray',
-                                      label=f'{STATES_LABELS[i]} (bars, rows 3-4)') for i in range(3)],
-                       loc='lower center', bbox_to_anchor=(0.5, 0.075), ncol=3,
-                       fontsize=AP_FS_LEGEND, frameon=True)
-        fig.tight_layout(rect=[0, 0.18, 1, 0.94])
-        _savepdf(fig, os.path.join(out_dir, f'A3-nie-lines{sfx}.pdf'))
+    _savepdf(fig, os.path.join(out_dir, f'A3-nie-lines{sfx}.pdf'))
 
 
 def save_model_pair_nie(out_dir, fam_a, fam_b, num_sample=None):
-    """
-    B: model vs model NIE (columns: gender, race, profession). Model A solid, model B dashed.
-      rows 1-2: base models, states and words NIE
-      rows 3-4: Instruct models, states and words NIE (only when both families have one)
-    """
-    a_base, a_inst, a_bname, a_iname = _load_family_pair(fam_a, PAPER_DOMAINS, num_sample)
-    b_base, b_inst, b_bname, b_iname = _load_family_pair(fam_b, PAPER_DOMAINS, num_sample)
-    lab = lambda f: 'Pythia-1b (step143000)' if f == 'pythia' else CROSS_PATCH_FAMILIES[f]['label']
-    base_tag = lambda f: lab(f) if f == 'pythia' else f'{lab(f)} base'
-    blocks = [[(a_base, base_tag(fam_a)), (b_base, base_tag(fam_b))]]
+    """B: model vs model NIE (columns: domains); model A solid, model B dashed.
+    Rows 1-2: Base models (states, words); rows 3-4: Post-trained models, when both families have one."""
+    a_base, a_inst, _, a_iname = _load_family_pair(fam_a, PAPER_DOMAINS, num_sample)
+    b_base, b_inst, _, b_iname = _load_family_pair(fam_b, PAPER_DOMAINS, num_sample)
+    blocks = [[(a_base, _family_label(fam_a)), (b_base, _family_label(fam_b))]]
     if a_iname and b_iname:
-        blocks.append([(a_inst, f'{lab(fam_a)} Instruct'), (b_inst, f'{lab(fam_b)} Instruct')])
-    n_rows = 2 * len(blocks)
-    fig, axes = plt.subplots(n_rows, 3, figsize=(AP_PANEL[0] * 3, AP_PANEL[1] * n_rows + 2.0))
-    vals = []
+        blocks.append([(a_inst, _family_label(fam_a)), (b_inst, _family_label(fam_b))])
+    fig, axes = _paper_fig(2 * len(blocks), 3, legend_rows=5)
     for i, models in enumerate(blocks):
-        vals += _nie_line_rows(axes[2 * i:2 * i + 2], ['states', 'words'], models, letter_start=6 * i,
-                               show_who=False, tag_suffix=', Base' if i == 0 else ', Post-trained (Instruct)')
+        _nie_line_rows(axes[2 * i:2 * i + 2], ['states', 'words'], models, letter_start=6 * i)
     _share_rows(axes)
-    _nie_legend(fig, ['states', 'words'], [(None, lab(fam_a)), (None, lab(fam_b))], AP_FS_LEGEND)
-    fig.suptitle(f'{lab(fam_a)} (solid) vs {lab(fam_b)} (dashed)', fontsize=AP_FS_HEADER)
-    fig.tight_layout(rect=[0, (0.18 if n_rows == 2 else 0.10), 1, (0.93 if n_rows == 2 else 0.96)])
+    _nie_legend(fig, ['states', 'words'], blocks=blocks)
     name = lambda f: FAMILY_PLOT_DIRS.get(f, f)
     _savepdf(fig, os.path.join(out_dir, f'B-nie-{name(fam_a)}-vs-{name(fam_b)}.pdf'))
 
 
-# ── main body: NIE overlay (gender, single panel) ────────────────────────────
+# ── main body: one row of panels, one model family per panel ─────────────────
 
-def save_main_body_nie_overlay(out_dir, num_sample=None, main_zf=None, family='olmo_1b'):
+MAIN_FAMILIES = ['olmo_1b', 'qwen2.5_1.5b', 'llama3.2_1b', 'gemma3_1b', 'pythia']
+
+
+def _family_label(family):
+    return 'Pythia 1B' if family == 'pythia' else CROSS_PATCH_FAMILIES[family]['label']
+
+
+def save_main_figures(out_dir, domain='gender', num_sample=None):
     """
-    Main body figure: single NIE panel for gender domain.
-    OLMo-2-0425-1B (solid) vs OLMo-2-0425-1B-Instruct (dashed).
-    3 restore conditions × 2 models = 6 lines.
-    Saved to out_dir/nie-overlay-gender.pdf
-    """
-    from matplotlib.lines import Line2D
-
-    print(f'  [NIE overlay] Loading {family} base + instruct...')
-    _b, _i, b_name, i_name = _load_family_pair(family, ['gender'], num_sample, main_zf)
-    base_res, inst_res = _b['gender'], _i.get('gender')
-    n_lay = _n_layers(base_res, inst_res)
-
-    SCORE_KEYS = ('states_score', 'mlp_score', 'attn_score')
-    NIE_LABELS = ['States', 'MLP window', 'Attn window']
-
-    def _nie(res, key):
-        """Signed-chain NIE, same definition as everywhere else. None if res, the
-        signed data, or a large-enough signed gap isn't available."""
-        key_map = {'states_score': 'bias_mean_signed', 'mlp_score': 'mlp_mean_signed',
-                   'attn_score': 'attn_mean_signed'}
-        if res is None:
-            return None
-        arr = res.get(key_map[key])
-        gap_s, low_s = res.get('effect_gap_signed'), res.get('mean_low_signed')
-        if arr is None or low_s is None or not signed_gap_reliable(gap_s):
-            return None
-        return normalized_indirect_effect(arr, low_s, gap_s, signed=True)
-
-    all_vals = []
-    for key in SCORE_KEYS:
-        for res in (base_res, inst_res):
-            v = _nie(res, key)
-            if v is not None:
-                all_vals.extend(v.tolist())
-
-    if not all_vals:
-        print('  [NIE overlay] No data; skipping.')
-        return
-
-    margin = (max(all_vals) - min(all_vals)) * 0.12 or 0.05
-    y_min  = min(all_vals) - margin
-    y_max  = max(all_vals) + margin
-
-    fig, ax = plt.subplots(1, 1, figsize=(7.0, FIG_ROW_H + 0.5))
-
-    for ki, (key, cond_label) in enumerate(zip(SCORE_KEYS, NIE_LABELS)):
-        color = BAR_COLORS[ki]
-        nie_b = _nie(base_res, key)
-        nie_i = _nie(inst_res, key)
-        xs    = np.arange(n_lay)
-        if nie_b is not None:
-            ax.plot(xs, nie_b, color=color, linewidth=2.0, linestyle='-',
-                    marker='o', markersize=3)
-        if nie_i is not None:
-            ax.plot(xs, nie_i, color=color, linewidth=2.0, linestyle='--',
-                    marker='s', markersize=3)
-
-    ax.axhline(0, color='black', linewidth=0.7, alpha=0.4)
-    ax.set_title(f'(a) Gender\n{b_name} (solid)' + (f' vs {i_name} (dashed)' if i_name else ''),
-                 fontsize=FS_TITLE+3)
-    ax.set_xlabel('Layer', fontsize=FS_LABEL+5)
-    ax.set_ylabel('NIE (normalized indirect effect)', fontsize=FS_LABEL+5)
-    ax.set_ylim(y_min, y_max)
-    ax.set_xticks(_layer_ticks(n_lay))
-    ax.tick_params(labelsize=FS_TICK+4)
-    ax.grid(alpha=0.2)
-
-    legend_handles = []
-    for ki, cond_label in enumerate(NIE_LABELS):
-        c = BAR_COLORS[ki]
-        legend_handles.append(
-            Line2D([0], [0], color=c, linewidth=2, linestyle='-',
-                   marker='o', markersize=4, label=f'{cond_label} — Base (solid)'))
-        legend_handles.append(
-            Line2D([0], [0], color=c, linewidth=2, linestyle='--',
-                   marker='s', markersize=4, label=f'{cond_label} — Instruct (dashed)'))
-    fig.legend(handles=legend_handles, loc='lower center', bbox_to_anchor=(0.5, 0.0),
-               ncol=2, fontsize=FS_LEGEND + 5, frameon=True,
-               labelspacing=0.4, handlelength=1.8, handletextpad=0.4, columnspacing=0.8)
-    fig.tight_layout(rect=[0, 0.17, 1, 1.0])
-    _savepdf(fig, os.path.join(out_dir, 'nie-overlay-gender.pdf' if family == 'olmo_1b'
-                               else f'nie-overlay-gender-{family}.pdf'))
-
-
-def save_main_body_pre_post_crosspatch(out_dir, num_sample=None, main_zf=None, family='olmo_1b'):
-    """
-    Main-body 2-panel gender figure (1×2, shared y-axis, no suptitle).
-
-      (a) Reference — within-model NIE overlay, 3 restore conditions:
-          OLMo-2-0425-1B (Pre, solid) vs OLMo-2-0425-1B-Instruct (Post, dashed).
-      (b) States NIE only, four solid lines in distinct colors:
-          Pre      = within-model base   (main)
-          Post     = within-model instruct (step_2000)
-          Pre→Post = cross-patch, Pre activations → Post model
-          Post→Pre = cross-patch, Post activations → Pre model
-
-    Every curve is NIE = (score − low) / (high − low), normalized to its own
-    recipient's clean−corrupted gap (the cross-patch runs store the recipient's
-    baselines), so all lines are directly comparable. Font sizes match
-    nie-overlay-gender.pdf. Saved to out_dir/pre-post-crosspatch-gender.pdf
+    Main-body figures, one panel per model family (each panel keeps its own layer axis):
+      main-nie-prepost-<domain>.pdf   1x5  NIE at subject / pre-target / target tokens, Base solid vs Post-trained
+                                           dashed (Pythia: Base only), shared legend
+      main-alp-prepost-<domain>.pdf   1x4  single-state ALP bars at the subject token, Base vs Post-trained
     """
     from matplotlib.lines import Line2D
+    pairs = {f: _load_family_pair(f, [domain], num_sample) for f in MAIN_FAMILIES}
+    def nie_panel(ax, k, n_cols, family, styled, keys, colors):
+        res = None
+        for results, (ls, mk) in styled:
+            res = results.get(domain)
+            for key, color in zip(keys, colors):
+                nie = _nie_curve(res, key)
+                if nie is not None:
+                    ax.plot(np.arange(len(nie)), nie, color=color, linestyle=ls, marker=mk,
+                            markevery=_mevery(len(nie), (ls, mk)), linewidth=2.0, markersize=3.5)
+            if res is not None and _low_sig(res):
+                _mark_low_sig(ax)
+        ax.axhline(0, color='black', linewidth=0.7, alpha=0.4)
+        ax.grid(alpha=0.2)
+        _panel(ax, _family_label(family), res['num_layer'], 'NIE' if k == 0 else '', n_cols)
 
-    FS_T = FS_TITLE + 3   # 13
-    FS_L = FS_LABEL + 5   # 14
-    FS_K = FS_TICK  + 4   # 12
-    FS_G = FS_LEGEND + 5  # 12
+    n = len(MAIN_FAMILIES)
+    for kind, colors, name in [('words', WORDS_COLORS, 'main-nie-prepost'), ('states', BAR_COLORS, 'main-nie-states-prepost'),
+                               ('states_pre', BAR_COLORS, 'main-nie-states-pretarget-prepost')]:
+        fig, axes = _paper_fig(1, n, legend_rows=2, row_h=PAPER_ROW_H)
+        for k, fam in enumerate(MAIN_FAMILIES):
+            styled = [(pairs[fam][0], STYLE_FIRST)] + ([(pairs[fam][1], STYLE_SECOND)] if pairs[fam][3] else [])
+            nie_panel(axes[0, k], k, n, fam, styled, _NIE_ROWS[kind][0], colors)
+            if k:
+                axes[0, k].tick_params(labelleft=False)   # shared y-range: ticks labelled on the first panel only
+        share_ylim(axes)
+        _nie_legend(fig, [kind], [(None, LABEL_PRE), (None, LABEL_POST)])
+        fig.subplots_adjust(wspace=0.06)   # narrow gaps between panels, so each x-axis is longer
+        _savepdf(fig, os.path.join(out_dir, f'{name}-{domain}.pdf'))
 
-    DOMAIN = 'gender'
+    post = [f for f in MAIN_FAMILIES if pairs[f][3]]
+    fig, axes = _paper_fig(1, len(post), legend_rows=1, row_h=PAPER_ROW_H)
+    width = 0.4
+    for k, fam in enumerate(post):
+        b, i = (pairs[fam][j].get(domain) for j in (0, 1))
+        ax, xs = axes[0, k], np.arange(b['num_layer'])
+        ax.bar(xs - width / 2, b['bias_mean'], width, color=BASE_COLOR, linewidth=0)
+        ax.bar(xs + width / 2, i['bias_mean'], width, color=INSTRUCT_COLOR, linewidth=0)
+        ax.grid(alpha=0.2)
+        _panel(ax, _family_label(fam), b['num_layer'], Y_LABEL_BARS if k == 0 else '', len(post))
+        if _low_sig(b) or _low_sig(i):
+            _mark_low_sig(ax)
+        lo = min(b['bias_mean'].min(), i['bias_mean'].min())
+        hi = max(b['bias_mean'].max(), i['bias_mean'].max())
+        ax.set_ylim(lo - 0.15 * (hi - lo), hi + 0.1 * (hi - lo))
+    _paper_legend(fig, [Patch(facecolor=BASE_COLOR, label=LABEL_PRE),
+                        Patch(facecolor=INSTRUCT_COLOR, label=LABEL_POST), _low_sig_handle()], 3)
+    _savepdf(fig, os.path.join(out_dir, f'main-alp-prepost-{domain}.pdf'))
 
-    print(f'  [pre-post-cp] Loading {family} Pre, Post + cross-patch...')
-    _b, _i, b_name, i_name = _load_family_pair(family, [DOMAIN], num_sample, main_zf)
-    pre_res, post_res = _b[DOMAIN], _i[DOMAIN]
-    p2post_res = load_cross_patch_domain('pre_to_post', DOMAIN, num_sample, family=family)
-    p2pre_res  = load_cross_patch_domain('post_to_pre', DOMAIN, num_sample, family=family)
-    n_lay = _n_layers(pre_res, post_res, p2post_res, p2pre_res)
 
-    def _nie(res, key):
-        """Signed-chain NIE, same definition as everywhere else. None if res, the
-        signed data, or a large-enough signed gap isn't available."""
-        key_map = {'bias': 'bias_mean_signed', 'mlp': 'mlp_mean_signed', 'attn': 'attn_mean_signed'}
-        if res is None:
-            return None
-        arr = res.get(key_map[key])
-        gap_s, low_s = res.get('effect_gap_signed'), res.get('mean_low_signed')
-        if arr is None or low_s is None or not signed_gap_reliable(gap_s):
-            return None
-        return normalized_indirect_effect(arr, low_s, gap_s, signed=True)
+def save_main_crosspatch(out_dir, domain='gender', num_sample=None):
+    """main-crosspatch-<domain>.pdf (1x4): single-state subject NIE, within-model (solid) vs cross-model (dashed),
+    for the patched Post model (Pre->Post) and the patched Pre model (Post->Pre)."""
+    from matplotlib.lines import Line2D
+    fams = [f for f in MAIN_FAMILIES if f != 'pythia']
+    fig, axes = _paper_fig(1, len(fams), legend_rows=2, row_h=PAPER_ROW_H)
+    for k, fam in enumerate(fams):
+        pre, post, _, _ = _load_family_pair(fam, [domain], num_sample)
+        lines = [(post, INSTRUCT_COLOR, STYLE_FIRST),
+                 ({domain: load_cross_patch_domain('pre_to_post', domain, num_sample, family=fam)}, INSTRUCT_COLOR, STYLE_SECOND),
+                 (pre, BASE_COLOR, STYLE_FIRST),
+                 ({domain: load_cross_patch_domain('post_to_pre', domain, num_sample, family=fam)}, BASE_COLOR, STYLE_SECOND)]
+        ax = axes[0, k]
+        for results, color, (ls, mk) in lines:
+            nie = _nie_curve(results.get(domain), 'bias')
+            if nie is not None:
+                ax.plot(np.arange(len(nie)), nie, color=color, linestyle=ls, marker=mk, linewidth=2.0, markersize=3)
+        ax.axhline(0, color='black', linewidth=0.7, alpha=0.4)
+        ax.grid(alpha=0.2)
+        _panel(ax, _family_label(fam), pre[domain]['num_layer'], 'NIE' if k == 0 else '', len(fams))
+        if k:
+            ax.tick_params(labelleft=False)
+    share_ylim(axes)
+    handles = [Line2D([0], [0], color=c, linestyle=ls, marker=mk, linewidth=2, label=lab) for c, (ls, mk), lab in [
+        (INSTRUCT_COLOR, STYLE_FIRST, 'Post patched, within-model'),
+        (INSTRUCT_COLOR, STYLE_SECOND, 'Post patched with Pre (Pre$\\to$Post)'),
+        (BASE_COLOR, STYLE_FIRST, 'Pre patched, within-model'),
+        (BASE_COLOR, STYLE_SECOND, 'Pre patched with Post (Post$\\to$Pre)')]]
+    _paper_legend(fig, handles, 2)
+    fig.subplots_adjust(wspace=0.06)
+    _savepdf(fig, os.path.join(out_dir, f'main-crosspatch-{domain}.pdf'))
 
-    # (a) within-model overlay: 3 conditions, Pre solid / Post dashed
-    COND_KEYS   = ('bias', 'mlp', 'attn')
-    COND_LABELS = ['States', 'MLP window', 'Attn window']
 
-    # (b) States-only, four distinct colors
-    B_SERIES = [
-        ('Pre',      pre_res,    BASE_COLOR,     'o'),
-        ('Post',     post_res,   INSTRUCT_COLOR, 's'),
-        ('Pre→Post', p2post_res, '#2E7D32',      '^'),
-        ('Post→Pre', p2pre_res,  '#6A1B9A',      'D'),
-    ]
+def save_main_compact(out_dir, domain='gender', num_sample=None):
+    """Single-column main figures:
+      main-nie-prepost-3models-<domain>.pdf  2x2, OLMo 2 / Qwen2.5 / Pythia token NIE, Pre solid vs Post dashed,
+                                             legend in the fourth cell
+      main-crosspatch-tokens[-notarget]-<domain>.pdf  1x2, OLMo 2 / Qwen2.5 cross-model token NIE,
+                                             Pre->Post solid vs Post->Pre dashed"""
+    from matplotlib.lines import Line2D
+    keys, labels, _ = _NIE_ROWS['words']
 
-    # shared y-range across both panels
-    all_vals = []
-    for key in COND_KEYS:
-        for res in (pre_res, post_res):
-            v = _nie(res, key)
-            if v is not None:
-                all_vals.extend(v.tolist())
-    for _, res, _, _ in B_SERIES:
-        v = _nie(res, 'bias')
-        if v is not None:
-            all_vals.extend(v.tolist())
-    if not all_vals:
-        print('  [pre-post-cp] No data; skipping.')
-        return
-    margin = (max(all_vals) - min(all_vals)) * 0.12 or 0.05
-    y_min, y_max = min(all_vals) - margin, max(all_vals) + margin
+    def lines(ax, styled, ks):
+        for results, (ls, mk) in styled:
+            for key, color in zip(keys, WORDS_COLORS):
+                nie = _nie_curve(results.get(domain), key) if key in ks else None
+                if nie is not None:
+                    ax.plot(np.arange(len(nie)), nie, color=color, linestyle=ls, marker=mk,
+                            markevery=_mevery(len(nie), (ls, mk)), linewidth=2.0, markersize=3.5)
+        ax.axhline(0, color='black', linewidth=0.7, alpha=0.4)
+        ax.grid(alpha=0.2)
 
-    fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(13.0, FIG_ROW_H + 1.0), sharey=True)
+    def handles(ks, styles):
+        """One legend entry per drawn line: token colour x run style."""
+        return [Line2D([0], [0], color=c, linestyle=ls, marker=mk, linewidth=2, label=f'{lab}, {name}')
+                for name, (ls, mk) in styles for k, lab, c in zip(keys, labels, WORDS_COLORS) if k in ks]
 
-    # ── panel (a) ──────────────────────────────────────────────────────────────
-    for ki, key in enumerate(COND_KEYS):
-        color = BAR_COLORS[ki]
-        nie_pre  = _nie(pre_res, key)
-        nie_post = _nie(post_res, key)
-        if nie_pre is not None:
-            ax_a.plot(np.arange(len(nie_pre)), nie_pre, color=color, linewidth=2.0,
-                      linestyle='-', marker='o', markersize=3)
-        if nie_post is not None:
-            ax_a.plot(np.arange(len(nie_post)), nie_post, color=color, linewidth=2.0,
-                      linestyle='--', marker='s', markersize=3)
-    ax_a.axhline(0, color='black', linewidth=0.7, alpha=0.4)
-    ax_a.set_title(f'(a) Gender — {b_name} (Pre) solid vs\n'
-                   f'{i_name} (Post) dashed', fontsize=FS_T)
-    ax_a.set_xlabel('Layer', fontsize=FS_L)
-    ax_a.set_xticks(_layer_ticks(n_lay))
-    ax_a.tick_params(labelsize=FS_K)
-    ax_a.grid(alpha=0.2)
-    handles_a = []
-    for ki, cond in enumerate(COND_LABELS):
-        c = BAR_COLORS[ki]
-        handles_a.append(Line2D([0], [0], color=c, linewidth=2, linestyle='-',
-                                marker='o', markersize=4, label=f'{cond} — Pre (solid)'))
-        handles_a.append(Line2D([0], [0], color=c, linewidth=2, linestyle='--',
-                                marker='s', markersize=4, label=f'{cond} — Post (dashed)'))
-    ax_a.legend(handles=handles_a, fontsize=FS_G, frameon=True, ncol=2,
-                loc='upper center', bbox_to_anchor=(0.5, -0.22),
-                labelspacing=0.3, handlelength=2.0, columnspacing=1.2)
-
-    # ── panel (b) ──────────────────────────────────────────────────────────────
-    handles_b = []
-    for name, res, color, mk in B_SERIES:
-        nie = _nie(res, 'bias')
-        if nie is not None:
-            ax_b.plot(np.arange(len(nie)), nie, color=color, linewidth=2.0,
-                      linestyle='-', marker=mk, markersize=4)
-        handles_b.append(Line2D([0], [0], color=color, linewidth=2, linestyle='-',
-                                marker=mk, markersize=5, label=f'States — {name}'))
-    ax_b.axhline(0, color='black', linewidth=0.7, alpha=0.4)
-    ax_b.set_title('(b) Gender — Pre, Post, Pre→Post, Post→Pre\n(States NIE)',
-                   fontsize=FS_T)
-    ax_b.set_xlabel('Layer', fontsize=FS_L)
-    ax_b.set_xticks(_layer_ticks(n_lay))
-    ax_b.tick_params(labelsize=FS_K, labelleft=True)   # keep y-ticks despite sharey
-    ax_b.grid(alpha=0.2)
-    ax_b.legend(handles=handles_b, fontsize=FS_G, frameon=True, ncol=2,
-                loc='upper center', bbox_to_anchor=(0.5, -0.22),
-                labelspacing=0.3, handlelength=2.0, columnspacing=1.2)
-
-    ax_a.set_ylim(y_min, y_max)
-    fig.supylabel(Y_LABEL_NIE, fontsize=FS_L)
+    fams = ['olmo_1b', 'qwen2.5_1.5b', 'pythia']
+    fig, axes = plt.subplots(2, 2, figsize=(PAPER_COL_WIDTH, 2 * PAPER_COL_WIDTH / 2 * 0.72))
+    for ax, fam in zip(axes.flat, fams):
+        pre, post, _, inst = _load_family_pair(fam, [domain], num_sample)
+        lines(ax, [(pre, STYLE_FIRST)] + ([(post, STYLE_SECOND)] if inst else []), keys)
+        _panel(ax, _family_label(fam), pre[domain]['num_layer'], 'NIE', 4)
+    share_ylim(axes[:, :].flat[:3])
+    axes[1, 1].axis('off')
+    axes[1, 1].legend(handles=handles(keys, [('Pre-trained model (Pre)', STYLE_PRE),
+                                             ('Post-trained model (Post)', STYLE_POST)]),
+                      loc='center left', bbox_to_anchor=(-0.08, 0.5), fontsize=PAPER_FS_LEGEND - 2, frameon=True,
+                      handlelength=2.2)
     fig.tight_layout()
-    fig.subplots_adjust(wspace=0.1)   # tighten gap between the two panels
-    _savepdf(fig, os.path.join(out_dir, 'pre-post-crosspatch-gender.pdf' if family == 'olmo_1b'
-                               else f'pre-post-crosspatch-gender-{family}.pdf'))
+    _savepdf(fig, os.path.join(out_dir, f'main-nie-prepost-3models-{domain}.pdf'))
+
+    for ks, sfx in [(keys, ''), (keys[:2], '-notarget')]:
+        fig, axes = _paper_fig(1, 2, legend_rows=len(ks) * 2, width=PAPER_COL_WIDTH, row_h=2.3)
+        for ax, fam in zip(axes[0], ['olmo_1b', 'qwen2.5_1.5b']):
+            pre, post, _, _ = _load_family_pair(fam, [domain], num_sample)
+            p2post = {domain: load_cross_patch_domain('pre_to_post', domain, num_sample, family=fam)}
+            p2pre = {domain: load_cross_patch_domain('post_to_pre', domain, num_sample, family=fam)}
+            lines(ax, [(pre, STYLE_PRE), (post, STYLE_POST), (p2post, STYLE_P2POST), (p2pre, STYLE_POST2PRE)], ks)
+            _panel(ax, _family_label(fam), p2post[domain]['num_layer'], 'NIE', 4)
+        share_ylim(axes)
+        _paper_legend(fig, handles(ks, [(LABEL_PRE, STYLE_PRE), (LABEL_POST, STYLE_POST),
+                                        (LABEL_P2POST, STYLE_P2POST), (LABEL_POST2PRE, STYLE_POST2PRE)]), 2)
+        _savepdf(fig, os.path.join(out_dir, f'main-crosspatch-tokens{sfx}-{domain}.pdf'))
 
 
-# ── appendix A7: cross-patch NIE overlay (within-model vs cross-patch) ────────
+def save_main_domain_compare(out_dir, num_sample=None):
+    """
+    main-domains.pdf (single column): clean LPD per domain for all nine models, grouped by model, with 95%
+    bootstrap intervals from tables/T6_bias_types.csv when scripts/tables.py has been run.
+    """
+    domains = ['gender', 'profession', 'race']
+    models, groups = [], []   # (tick label, results) per bar group; (family label, first index, last index)
+    for fam in MAIN_FAMILIES:
+        base, inst, _, i_name = _load_family_pair(fam, domains, num_sample)
+        start = len(models)
+        models.append(('Pre', base))
+        if i_name:
+            models.append(('Post', inst))
+        groups.append((_family_label(fam).rsplit(' ', 1)[0], start, len(models) - 1))
+    ci_path = os.path.join(TABLES_DIR, 'T6_bias_types.csv')
+    ci = None
+    if os.path.exists(ci_path):
+        import pandas as pd
+        ci = pd.read_csv(ci_path)
+    fig, axes = _paper_fig(1, 1, legend_rows=1, width=PAPER_COL_WIDTH)
+    ax, width = axes[0, 0], 0.27
+    xs = np.arange(len(models))
+    for k, d in enumerate(domains):
+        vals = [res[d]['mean_high_signed'] for _, res in models]
+        err = None
+        if ci is not None and len(ci) == len(models):
+            lo, hi = ci[f'Delta_clean_{d}_lo'].to_numpy(), ci[f'Delta_clean_{d}_hi'].to_numpy()
+            err = [np.array(vals) - lo, hi - np.array(vals)]
+        ax.bar(xs + (k - 1) * width, vals, width, color=DOMAIN_COLORS[d], linewidth=0, label=d.capitalize(),
+               yerr=err, error_kw=dict(elinewidth=0.8, capsize=1.5, ecolor='black'))
+    ax.set_xticks(xs)
+    ax.set_xticklabels([m for m, _ in models], fontsize=PAPER_FS_TICK - 3)
+    for name, first, last in groups:
+        ax.text((first + last) / 2, -0.17, name, transform=ax.get_xaxis_transform(), ha='center', va='top',
+                fontsize=PAPER_FS_TICK - 2)
+    ax.set_ylabel('LPD', fontsize=PAPER_FS_LABEL)
+    ax.tick_params(axis='y', labelsize=PAPER_FS_TICK)
+    ax.grid(axis='y', alpha=0.2)
+    handles, _ = ax.get_legend_handles_labels()
+    _paper_legend(fig, handles, 3)
+    _savepdf(fig, os.path.join(out_dir, 'main-domains.pdf'))
+
 
 def save_crosspatch_nie_overlay(out_dir, num_sample=None, main_zf=None, family='olmo_1b'):
     """
-    A7 (4×3): cross-model vs within-model patching of the same recipient, NIE.
-      rows 1-2: Pre → Post (base activations into the Instruct model), states and words
-      rows 3-4: Post → Pre (Instruct activations into the base model), states and words
-    Solid = within-model patching of the recipient, dashed = cross-model patching into it.
-    Both use the recipient's own clean-corrupted gap, so they are directly comparable.
+    A7 (4x3): within-model vs cross-model patching of the same model, NIE (line styles from plot_utils).
+      rows 1-2: Pre -> Post (the Post model is patched), states and words
+      rows 3-4: Post -> Pre (the Pre model is patched), states and words
+    Both use the patched model's own clean and corrupted passes, so they are directly comparable.
     """
     print(f'  [A7] Loading {family} Pre, Post + cross-patch...')
-    pre, post, b_name, i_name = _load_family_pair(family, PAPER_DOMAINS, num_sample, main_zf)
+    pre, post, _, _ = _load_family_pair(family, PAPER_DOMAINS, num_sample, main_zf)
     p2post = {d: load_cross_patch_domain('pre_to_post', d, num_sample, family=family) for d in PAPER_DOMAINS}
     p2pre = {d: load_cross_patch_domain('post_to_pre', d, num_sample, family=family) for d in PAPER_DOMAINS}
-    blocks = [(', Pre → Post', [(post, 'within-model patching'), (p2post, 'cross-model patching')]),
-              (', Post → Pre', [(pre, 'within-model patching'), (p2pre, 'cross-model patching')])]
-    fig, axes = plt.subplots(4, 3, figsize=(AP_PANEL[0] * 3, AP_PANEL[1] * 4 + 1.8))
-    for i, (direction, models) in enumerate(blocks):
-        _nie_line_rows(axes[2 * i:2 * i + 2], ['states', 'words'], models, letter_start=6 * i,
-                       show_who=False, tag_suffix=direction)
+    blocks = [[(post, LABEL_POST, STYLE_POST), (p2post, LABEL_P2POST, STYLE_P2POST)],
+              [(pre, LABEL_PRE, STYLE_PRE), (p2pre, LABEL_POST2PRE, STYLE_POST2PRE)]]
+    fig, axes = _paper_fig(4, 3, legend_rows=6)
+    for i, models in enumerate(blocks):
+        _nie_line_rows(axes[2 * i:2 * i + 2], ['states', 'words'], models, letter_start=6 * i)
+    for r, ax in enumerate(axes.flat):
+        ax.set_title(ax.get_title() + (': Post vs. Pre$\\to$Post' if r < 6 else ': Pre vs. Post$\\to$Pre'), fontsize=PAPER_FS_TITLE)
     _share_rows(axes)
-    fig.suptitle(f'Cross-model patching: {b_name} and {i_name}\n'
-                 f'Pre → Post: {b_name} activations into {i_name};  Post → Pre: the reverse',
-                 fontsize=AP_FS_HEADER)
-    _nie_legend(fig, ['states', 'words'], models, AP_FS_LEGEND)
-    fig.tight_layout(rect=[0, 0.11, 1, 0.94])
+    _nie_legend(fig, ['states', 'words'], blocks=blocks)
     _savepdf(fig, os.path.join(out_dir, 'A7-crosspatch-nie-overlay.pdf' if family == 'olmo_1b'
                                else f'A7-crosspatch-nie-overlay-{family}.pdf'))
 
@@ -1978,24 +1932,10 @@ def save_appendix_A4_cross_patch_bars(all_direction_results, out_dir,
         print('  [A4] No cross-patch data; skipping.')
         return
 
-    row_specs = [
-        (pre,  'states', STATES_COLORS, 'Pre → Post', 'effect of states'),
-        (pre,  'words',  WORDS_COLORS,  'Pre → Post', 'effect of different words'),
-        (post, 'states', STATES_COLORS, 'Post → Pre', 'effect of states'),
-        (post, 'words',  WORDS_COLORS,  'Post → Pre', 'effect of different words'),
-    ]
-    row_ylims = [
-        _row_ylim(pre,  PAPER_DOMAINS, 'bias_mean', 'mlp_mean', 'attn_mean'),
-        _row_ylim(pre,  PAPER_DOMAINS, 'bias_mean', 'pre_blank_mean', 'blank_mean'),
-        _row_ylim(post, PAPER_DOMAINS, 'bias_mean', 'mlp_mean', 'attn_mean'),
-        _row_ylim(post, PAPER_DOMAINS, 'bias_mean', 'pre_blank_mean', 'blank_mean'),
-    ]
-
-    fig, axes = plt.subplots(4, 3, figsize=(AP_PANEL[0] * 3, AP_PANEL[1] * 4 + 1.2))
-    _bars_grid(axes, row_specs, PAPER_DOMAINS, None)
+    fig, axes = _paper_fig(4, 3, legend_rows=3)
+    _bars_grid(axes, [(pre, 'states'), (pre, 'words'), (post, 'states'), (post, 'words')], PAPER_DOMAINS)
     _share_rows(axes)
-    _states_words_legend(fig)
-    fig.tight_layout(rect=[0, 0.07, 1, 1.0])
+    _paper_legend(fig, _bars_legend_handles(), 3)
     _savepdf(fig, os.path.join(out_dir, out_name))
 
 
@@ -2008,11 +1948,6 @@ def save_appendix_A5_trajectory(base_stats, instruct_stats, out_dir, out_name='A
     OLMo base (blue solid) and instruct (orange dashed) plotted on the same x-axis.
     Y-axis shared across all 3 panels.
     """
-    A5_FS_TITLE  = FS_TITLE  + 4   # 14
-    A5_FS_LABEL  = FS_LABEL  + 3   # 12
-    A5_FS_TICK   = FS_TICK   + 3   # 11
-    A5_FS_LEGEND = FS_LEGEND + 4   # 11
-
     letters = ['a', 'b', 'c']
 
     domain_data = {}
@@ -2021,11 +1956,11 @@ def save_appendix_A5_trajectory(base_stats, instruct_stats, out_dir, out_name='A
         for e in base_stats:
             s = e['domains'].get(domain)
             if s:
-                base_pts.append((e['label'], s['effect_gap'], s['effect_gap'] < LOW_SIGNAL))
+                base_pts.append((e['label'], s['effect_gap_signed'], abs(s['effect_gap_signed']) < LOW_SIGNAL))
         for e in instruct_stats:
             s = e['domains'].get(domain)
             if s:
-                instruct_pts.append((e['label'], s['effect_gap'], s['effect_gap'] < LOW_SIGNAL))
+                instruct_pts.append((e['label'], s['effect_gap_signed'], abs(s['effect_gap_signed']) < LOW_SIGNAL))
         if base_pts or instruct_pts:
             domain_data[domain] = (base_pts, instruct_pts)
 
@@ -2037,12 +1972,11 @@ def save_appendix_A5_trajectory(base_stats, instruct_stats, out_dir, out_name='A
     if not all_gaps:
         return
     margin = (max(all_gaps) - min(all_gaps)) * 0.12 or 0.005
-    y_min  = max(0.0, min(all_gaps) - margin)
+    y_min  = min(all_gaps) - margin
     y_max  = max(all_gaps) + margin
 
-    n_total = max(len(bp) + len(ip) for bp, ip in domain_data.values())
-    fig_w   = max(FIG_LINE_W_PER_PAN, n_total * 1.2)
-    fig, axes = plt.subplots(3, 1, figsize=(fig_w, (FIG_ROW_H + 0.5) * 3))
+    fig, axes = _paper_fig(3, 1, legend_rows=1, row_h=PAPER_TRAJ_ROW_H)
+    axes = axes[:, 0]
 
     for ax, letter, domain in zip(axes, letters, PAPER_DOMAINS):
         if domain not in domain_data:
@@ -2057,13 +1991,13 @@ def save_appendix_A5_trajectory(base_stats, instruct_stats, out_dir, out_name='A
         low_sig  = [p[2] for p in all_pts]
 
         ax.plot(xs[:n_base], gaps[:n_base], 'o-',
-                color=BASE_COLOR, label='Base (pre-training)',
+                color=BASE_COLOR, label=LABEL_PRE,
                 linewidth=2, markersize=7, zorder=3)
         if instruct_pts:
             bridge_xs = [n_base - 1] + list(xs[n_base:])
             bridge_ys = [gaps[n_base - 1]] + list(gaps[n_base:])
             ax.plot(bridge_xs, bridge_ys, 's--',
-                    color=INSTRUCT_COLOR, label='Instruct fine-tuning',
+                    color=INSTRUCT_COLOR, label=LABEL_POST,
                     linewidth=2, markersize=7, zorder=3)
             ax.axvline(n_base - 0.5, color='gray', linestyle='--',
                        linewidth=1.2, alpha=0.6)
@@ -2072,26 +2006,28 @@ def save_appendix_A5_trajectory(base_stats, instruct_stats, out_dir, out_name='A
             if ls:
                 ax.annotate('⚠', (xs[xi], gaps[xi]),
                             textcoords='offset points', xytext=(0, 6),
-                            ha='center', fontsize=FS_LABEL, color=LOW_SIG_COLOR)
+                            ha='center', fontsize=PAPER_FS_LABEL, color=LOW_SIG_COLOR)
 
         ax.set_xticks(xs)
-        ax.set_xticklabels(labels_x, rotation=30, ha='right', fontsize=A5_FS_TICK)
-        ax.set_xlabel('Training checkpoint', fontsize=A5_FS_LABEL)
-        ax.set_ylabel('Effect gap (high − low)', fontsize=A5_FS_LABEL)
-        ax.set_title(f'({letter}) {domain.capitalize()}', fontsize=A5_FS_TITLE)
+        ax.set_xticklabels([CKPT_TICKS.get(l, l) for l in labels_x], fontsize=PAPER_FS_TICK)
+        ax.set_xlabel('Training checkpoint', fontsize=PAPER_FS_LABEL)
+        ax.set_ylabel('Effect gap', fontsize=PAPER_FS_LABEL)
+        ax.set_title(f'({letter}) {domain.capitalize()}', fontsize=PAPER_FS_TITLE)
         ax.set_ylim(y_min, y_max)
-        ax.tick_params(axis='y', labelsize=A5_FS_TICK)
+        ax.tick_params(axis='y', labelsize=PAPER_FS_TICK)
         ax.grid(axis='y', alpha=0.25)
         ax.axhline(0, color='black', linewidth=0.7, alpha=0.3)
 
-    handles, labels_leg = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels_leg, loc='lower center', bbox_to_anchor=(0.5, 0.0),
-               ncol=2, fontsize=A5_FS_LEGEND, frameon=True)
-    fig.tight_layout(rect=[0, 0.06, 1, 1.0])
+    handles, _ = axes[0].get_legend_handles_labels()
+    _paper_legend(fig, handles + [_low_sig_handle()], 3)
     _savepdf(fig, os.path.join(out_dir, out_name))
 
 
 # ── appendix A6: NIE heatmap (layer × checkpoint) ────────────────────────────
+
+_A6_CMAP = plt.get_cmap('RdBu_r').copy()
+_A6_CMAP.set_bad(LOW_SIG_BG)
+
 
 def save_appendix_A6_heatmap(base_stats, instruct_stats, out_dir, num_sample=None,
                              out_name='A6-heatmap.pdf', step2000_model='OLMo-2-0425-1B-Instruct'):
@@ -2104,11 +2040,6 @@ def save_appendix_A6_heatmap(base_stats, instruct_stats, out_dir, num_sample=Non
     step_2000 is missing from instruct stats.json NIE arrays; loaded from local NFS.
     Colorscale shared per row (same condition, all 3 domains).
     """
-    A6_FS_TITLE  = FS_TITLE  + 3   # 13
-    A6_FS_LABEL  = FS_LABEL  + 4   # 13
-    A6_FS_TICK   = FS_TICK   + 3   # 11
-    A6_FS_CBAR   = FS_TICK   + 2   # 10
-
     # (display label, stats.json key, load_within_model_from_local dict key)
     # attn_score in stats = _attn.npz = restored window of Attn outputs
     # mlp_score  in stats = _mlp.npz  = restored window of MLP outputs
@@ -2180,7 +2111,8 @@ def save_appendix_A6_heatmap(base_stats, instruct_stats, out_dir, num_sample=Non
         matrix   = np.stack([p[1] for p in all_pts], axis=1)  # (num_layer, n_checkpoints)
         return matrix, labels_x, len(base_pts)
 
-    fig, axes = plt.subplots(3, 3, figsize=(15, 10))
+    fig, axes = _paper_fig(3, 3, legend_rows=1)
+    fig.set_figheight(fig.get_figheight() + 3 * 1.0)   # room for vertical checkpoint ticks
 
     for row_i, (cond_label, stats_key, local_key) in enumerate(conditions):
         # Build matrices for all domains; collect for shared colorscale
@@ -2211,7 +2143,7 @@ def save_appendix_A6_heatmap(base_stats, instruct_stats, out_dir, num_sample=Non
 
             im = ax.imshow(
                 matrix, aspect='auto', origin='lower',
-                cmap='RdBu_r', vmin=vmin, vmax=vmax,
+                cmap=_A6_CMAP, vmin=vmin, vmax=vmax,
                 extent=[-0.5, matrix.shape[1] - 0.5, -0.5, num_layer - 0.5])
 
             # Vertical separator between base pre-training and instruct fine-tuning
@@ -2220,32 +2152,34 @@ def save_appendix_A6_heatmap(base_stats, instruct_stats, out_dir, num_sample=Non
                            linestyle='--', alpha=0.7)
 
             ax.set_xticks(np.arange(len(labels_x)))
-            ax.set_xticklabels(labels_x, rotation=45, ha='right', fontsize=A6_FS_TICK)
+            ax.set_xticklabels([CKPT_TICKS.get(l, l).replace('\n', ' ') for l in labels_x], rotation=90,
+                               fontsize=PAPER_FS_TICK - 2)
             ax.set_yticks(np.arange(0, num_layer, 2))
-            ax.tick_params(axis='y', labelsize=A6_FS_TICK)
+            ax.tick_params(axis='y', labelsize=PAPER_FS_TICK)
 
             if row_i == 0:
-                ax.set_title(domain.capitalize(), fontsize=A6_FS_TITLE, fontweight='bold')
+                ax.set_title(f'({"abc"[col_i]}) {domain.capitalize()}', fontsize=PAPER_FS_TITLE)
 
             if col_i == 0:
-                ax.set_ylabel('Layer', fontsize=A6_FS_LABEL)
+                ax.set_ylabel('Layer', fontsize=PAPER_FS_LABEL)
                 ax.annotate(cond_label, xy=(-0.28, 0.5), xycoords='axes fraction',
                             rotation=90, ha='center', va='center',
-                            fontsize=A6_FS_LABEL, fontweight='bold')
+                            fontsize=PAPER_FS_LABEL)
             else:
                 ax.set_ylabel('')
 
             if row_i == len(conditions) - 1:
-                ax.set_xlabel('Checkpoint', fontsize=A6_FS_LABEL)
+                ax.set_xlabel('Checkpoint', fontsize=PAPER_FS_LABEL)
 
             cb = plt.colorbar(im, ax=ax, shrink=0.85, pad=0.03)
-            cb.ax.tick_params(labelsize=A6_FS_CBAR)
+            cb.ax.tick_params(labelsize=PAPER_FS_TICK - 2)
             if col_i == 2:
-                cb.set_label(Y_LABEL_NIE, fontsize=A6_FS_CBAR)
+                cb.set_label('NIE', fontsize=PAPER_FS_LABEL)
             else:
                 cb.set_label('')
 
-    fig.tight_layout()
+    _paper_legend(fig, [Patch(facecolor=LOW_SIG_BG, edgecolor=LOW_SIG_COLOR,
+                              label='\u26a0 Effect gap < 0.03 (checkpoint not shown)')], 1)
     _savepdf(fig, os.path.join(out_dir, out_name))
 
 
@@ -2615,8 +2549,10 @@ if RUN_APPENDIX:
 
     print('\n  A2: Pythia bar charts (2×3)...')
     save_appendix_A2_pythia_bars(_paper(appendix_out, 'pythia'), args.num_sample)
+    for _fam in list(CROSS_PATCH_FAMILIES) + ['pythia']:
+        save_appendix_lpd_bars(_paper(appendix_out, _fam), _fam, args.num_sample)
 
-    for _fam in cp_families_to_run:
+    for _fam in list(cp_families_to_run) + ['pythia']:
         print(f'\n  A3-1 / A3-2: {_fam}...')
         save_appendix_A3_nie_lines(_paper(appendix_out, _fam), args.num_sample,
                                    main_zf=_app_main_zf, family=_fam)
@@ -2661,21 +2597,13 @@ if RUN_APPENDIX:
     else:
         print('  [A5] Skipping.')
 
-    print('\n  A6: NIE heatmap — layer × checkpoint (3 conditions × 3 domains)...')
-    if _base_traj and _instruct_traj:
-        save_appendix_A6_heatmap(_base_traj, _instruct_traj, _paper(appendix_out, 'olmo_1b'), args.num_sample)
-    else:
-        print('  [A6] Skipping.')
-
-    print('\n  Pythia: trajectory + NIE heatmap over its checkpoints...')
+    print('\n  Pythia: effect gap over its checkpoints...')
     _pythia_traj = _load_checkpoints_from_npz('pythia-1b', args.num_sample)
     if _all_ckpts(_pythia_traj):
         save_appendix_A5_trajectory(_pythia_traj, [], _paper(appendix_out, 'pythia'),
                                     out_name='A5-trajectory-pythia.pdf')
-        save_appendix_A6_heatmap(_pythia_traj, [], _paper(appendix_out, 'pythia'),
-                                 args.num_sample, out_name='A6-heatmap-pythia.pdf', step2000_model=None)
     else:
-        print('  [Pythia A5/A6] Some checkpoints are not finished yet; skipping.')
+        print('  [Pythia A5] Some checkpoints are not finished yet; skipping.')
 
 # ── cross-patch NIE overlay (within-model vs cross-patch, 4×3) ────────────────
 if RUN_CP_NIE:
@@ -2686,6 +2614,13 @@ if RUN_CP_NIE:
     USE_PKG_RESULTS or os.makedirs(cp_mb_out, exist_ok=True)
     for _fam in cp_families_to_run:
         save_crosspatch_nie_overlay(_paper(cp_nie_out, _fam), args.num_sample, family=_fam)
+
+if RUN_MAIN:
+    print('\n=== Main-body figures ===')
+    save_main_figures(_paper(PLOTS_BASE), num_sample=args.num_sample)
+    save_main_domain_compare(_paper(PLOTS_BASE), num_sample=args.num_sample)
+    save_main_crosspatch(_paper(PLOTS_BASE), num_sample=args.num_sample)
+    save_main_compact(_paper(PLOTS_BASE), num_sample=args.num_sample)
 
 zf.close()
 print('\nDone.')

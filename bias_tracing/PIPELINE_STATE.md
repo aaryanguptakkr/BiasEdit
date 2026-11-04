@@ -1,6 +1,6 @@
 # Pipeline State — what the causal-tracing pipeline measures, and what it supports
 
-**Scope:** `experiments/bias_trace.py`, `plot_utils.py`, `fig.py`, `scripts/table.py`, as of
+**Scope:** `experiments/bias_trace.py`, `plot_utils.py`, `fig.py`, `scripts/tables.py`, as of
 commit `c2a31a3` on `main`. Every number here comes from an actual run or an actual result
 file, except where explicitly marked "illustrative".
 
@@ -216,9 +216,23 @@ stereotype it started with*. A layer can have high ALP and near-zero signed NIE 
 score, but roughly as often toward the anti-stereotype as the stereotype across cases) —
 that's not a contradiction, it's the whole point of keeping the two separate.
 
+**What the paper uses (2026-11).** Effect gap = mean clean signed LPD − mean corrupted signed LPD
+(`scripts/tables.py`, `run['sgn']`); NIE = (mean restored − mean corrupted) / effect gap, on the
+signed chain; the ⚠ low-signal marker uses the signed effect gap. abs. LPD (ALP) appears only for
+the clean run (`tables/T4`, `T6`); the restored-ALP bar figures were dropped from the paper.
+W1/JSD (`tables/T5`) compare per-case signed LPD at the subject single state, within vs cross,
+averaged over layers (`--dist-chain sgn`, the default).
+
 Historical note that matters when reading older figures: before the signed chain existed, NIE
 was computed from the **abs** chain, which made it a pure rescaling of ALP rather than an
 independent quantity. Any figure or table predating the signed rollout should be read that way.
+
+**Start token at position 0.** OLMo 2 and Pythia get `<|endoftext|>` glued on by `make_inputs`
+(`experiments/bias_trace.py`, with the span offset in `dsets/stereoset.py`); Llama 3.2 and Gemma 3
+tokenizers add their own BOS; Qwen2.5 has none (`bos_token: null`, `add_bos_token: false` in both
+tokenizer configs), so its position 0 is the first word. Position 0 is never scored, so Qwen's
+first word gets no probability, and when the subject is the first word Qwen's corruption hits
+position 0 (174/684 gender, 920/1036 race, 45/556 profession cases).
 
 ## 5. Worked example, end to end
 
@@ -391,9 +405,8 @@ scale:
   than the reverse — mild evidence fine-tuning *adds* structure the base model's later layers
   never learned to handle, not just rotates existing structure.
 
-`scripts/table.py`'s Part 2 (W1/JSD distributional distance) is on firmer ground for a
-cross-model comparison than any NIE-based figure — it compares raw pooled distributions
-directly and never assumes the `[low, high]` anchoring that breaks above.
+The paper's W1/JSD distances come from `scripts/tables.py` (T5), on per-case signed LPD.
+Either way, a distributional distance never assumes the `[low, high]` anchoring that breaks above.
 
 ## 10. Where the numbers get weird — corner-case gallery
 
@@ -465,10 +478,8 @@ directly and never assumes the `[low, high]` anchoring that breaks above.
   single-token case. Fixed to average a case's own rows into one per-case value first, then
   average across cases — this is a different problem from the metric choice above (it would exist
   under blank-only scoring too, since a 2-token fill still produces 2 rows) and applies whichever
-  metric ends up primary. `scripts/table.py::load_per_token_K` (Part 2's W1/JSD distance) still
-  does raw per-token pooling deliberately, for a stated reason (matching what the bars used to
-  average) — its docstring's claim that this matches the plotted bar is now stale and should be
-  revisited with whichever task next touches Part 2. Whether to also adopt ROME's last-subject-
+  metric ends up primary. The paper's W1/JSD (`scripts/tables.py`, T5) uses the per-case subject
+  value as well. Whether to also adopt ROME's last-subject-
   token convention (vs. this average-all-subtokens choice) was raised and left open: the L0
   dominance this pipeline finds points at a per-token embedding effect rather than ROME's
   multi-token-entity-integration mechanism, so the convention wasn't assumed to transfer; cheap to
@@ -557,7 +568,7 @@ bf16 re-runs replace these files and show no such deviation.
 | Shared within-model/cross-patch result-dict builder | `fig.py::_finalize_result_dict` |
 | Within-model report (NIE table, trajectory) | `fig.py::save_stats_and_report`, `save_bias_trajectory` |
 | Cross-model probe (source of §7/§10's numbers) | `verification/cross_model_scale_probe.py` |
-| Comparison table for the paper | `scripts/table.py` |
+| Tables for the paper (T1–T7) | `scripts/tables.py` |
 
 ---
 

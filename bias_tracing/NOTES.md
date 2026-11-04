@@ -216,8 +216,8 @@ cd bias_tracing
 python fig.py --plots appendix --source auto    # A5/A6 via NPZ (no stats.json dependency)
 python fig.py --plots cross_patch --source auto # 4panel + saves to main_body/
 
-# Paper table values (independent, reads NPZ directly)
-python scripts/table.py
+# Paper tables T1-T7 and appendix_T*.tex (reads the NPZ case files directly)
+python scripts/tables.py
 
 # Comparison/line plots (reads stats.json; run after bars if stats.json was regenerated)
 python scripts/regenerate_compare_plots.py
@@ -373,44 +373,32 @@ Three `.npz` files are written per sentence pair:
 Scores are aggregated over **subject token positions only** (not the full sentence, which would
 pick up the prediction-target token and give misleading results).
 
-The **NIE** (Normalized Indirect Effect):
+The **NIE** (Normalized Indirect Effect), on the signed chain (LPD = mean token log P(stereo)
+− mean token log P(anti), averaged over cases):
 
-$$\text{NIE} = \frac{\text{Patched Absolute Diff} - \text{Corrupted Absolute Diff}}{\text{Clean Absolute Diff} - \text{Corrupted Absolute Diff}}$$
+$$\text{NIE} = \frac{\overline{\text{LPD}}_\text{restored} - \overline{\text{LPD}}_\text{corrupted}}{\overline{\text{LPD}}_\text{clean} - \overline{\text{LPD}}_\text{corrupted}}$$
 
-Where "Absolute Diff" = |log P(stereotyped) − log P(anti-stereotyped)| for the same sentence template.
+- NIE = 1: full recovery; NIE = 0: none; NIE < 0: restoring pushes toward the anti-stereotype
+- `effect_gap_signed = mean_high_signed − mean_low_signed` = Clean − Corrupted (signed), the
+  denominator above and the quantity the ⚠ low-signal marker (< 0.03) checks.
 
-- NIE > 0: this position causally contributes to the prediction
-- NIE < 0: restoring this position makes things *worse* than the corrupted baseline (inconsistent state)
-- NIE = 1: full recovery
-
-In terms of stored values: `(states_nie[L] − mean_low) / effect_gap` — where `mean_low` is the
-mean corrupted-run score (subject tokens noised), `mean_high` is the mean clean-run score, and
-`effect_gap = mean_high − mean_low` = Clean − Corrupted.
-
-> **Note on field naming in `stats.json`**: The fields `states_nie`, `attn_nie`, `mlp_nie` store
-> **raw abs log prob diffs** (not normalized NIE values), despite the `_nie` suffix. They are the
-> per-layer patched scores averaged across sentence pairs. Apply the NIE formula above when you
-> need normalized values.
+> **Note on field naming in `stats.json`**: `states_nie`, `attn_nie`, `mlp_nie` store raw
+> per-layer abs. LPD means (not NIE), despite the suffix. Compute NIE from the signed fields
+> `states_score_signed`, `mean_low_signed` and `effect_gap_signed` with the formula above.
 
 ---
 
 ### Plot conventions
 
-**Bar chart labels and colors** (follows original BiasEdit paper):
+Colours: blue = single state, red = MLP window, green = Attn window (subject token); purple /
+orange / cyan = subject / pre-target / target token. Line styles: Pre solid (circle), Post dashed
+(square), Pre→Post dotted (triangle), Post→Pre dash-dot (diamond). The old "severed" labels were
+wrong and are retired: `_mlp` / `_attn` files restore a window of MLP / attention outputs.
 
-| Bar color | Label | Restore condition | What's "severed" |
-|---|---|---|---|
-| Blue | Effect of single state | Full restore (MLP + Attn) | — |
-| Red | Effect with Attn severed | MLP-only restore | Attention disabled |
-| Green | Effect with MLP severed | Attn-only restore | MLP disabled |
-
-"Severed" means that component is left in its corrupted state and does not contribute. The label
-describes what is *disabled*, while the file suffix describes what is *restored* (`_mlp` = MLP-only
-restore = Attn severed → red bar; `_attn` = Attn-only restore = MLP severed → green bar).
-
-**Y-axis**: All bar charts and line plots use `Abs. log prob diff (stereo − anti)` (raw, unnormalized).
-Delta plots use `Δ Abs. log prob diff (stereo − anti)`. The bias-trajectory plot uses NIE at L0
-(normalized, see formula above) in its second panel alongside the raw value in its third panel.
+**Y-axis**: bar charts show abs. LPD (raw, unnormalized; no longer in the paper); line plots show
+NIE (signed chain, formula above). The supporting `<domain>-bias-trajectory.pdf` shows the abs
+effect gap, the signed NIE at L0 and the raw abs. LPD at L0; the paper's A5 figure shows the signed
+effect gap.
 
 **⚠ Low-signal marker**: Plotted when `effect_gap < 0.03`. At that threshold the model barely
 distinguishes high-bias from low-bias examples, making causal tracing estimates unreliable
